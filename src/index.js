@@ -1,5 +1,5 @@
-import { initSketch } from './javascript/sketch.js'
+import { initOcean } from './javascript/ocean.js'
 
 document.addEventListener('DOMContentLoaded', () => {
-  initSketch()
+  initOcean()
 })

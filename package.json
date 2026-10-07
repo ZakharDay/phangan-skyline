@@ -6,6 +6,6 @@
     "build": "bun run clean && bun run bun.config.prod.js"
   },
   "dependencies": {
-    "p5": "^2.1.1"
+    "three": "^0.186.1"
   }
 }

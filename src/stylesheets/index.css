@@ -1,5 +1,10 @@
 .sketchContainer {
   width: 100vw;
   height: 100vh;
-  background-color: darkgrey;
+  overflow: hidden;
+  background-color: #0b1a24;
+}
+
+.sketchContainer canvas {
+  display: block;
 }
