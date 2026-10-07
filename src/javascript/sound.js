@@ -6,8 +6,8 @@ import { createRandom } from './random.js'
 //   - a low distant surf,
 //   - diesel generators humming on the nearest squid boats, each at its own pitch,
 //     placed left or right where the boat is,
-//   - crickets on the hill, fewer late at night and in fog,
-//   - a slow pad and rare bell notes like glints on the water: the key comes from the hash,
+//   - now and then a cricket on the hill (not every night, never in fog),
+//   - rare slow chords and rare bell notes like glints on the water: the key comes from the hash,
 //     the mode from the moon (darker at new moon, brighter at full moon).
 // Fog muffles everything and adds a longer echo. Every random choice comes from a named
 // stream (layer and event number), so a night always sounds the same.
@@ -28,10 +28,11 @@ const WEATHER_SOUND = {
   fog: { cutoff: 2500, wet: 0.55, decay: 9 }
 }
 
+// Slow sea: one swell of noise every 10-22 seconds, rising for several seconds and fading longer
 const SEA_SOUND = {
-  calm: { level: 0.07, period: [9, 12], bells: 0.12 },
-  ripple: { level: 0.13, period: [7, 9], bells: 0.2 },
-  breeze: { level: 0.22, period: [5, 7], bells: 0.28 }
+  calm: { level: 0.07, period: [17, 22], bells: 0.04 },
+  ripple: { level: 0.12, period: [13, 17], bells: 0.06 },
+  breeze: { level: 0.18, period: [10, 13], bells: 0.09 }
 }
 
 const PAD_TIMBRE = { green: 'sine', white: 'triangle', mixed: 'sine4' }
@@ -44,7 +45,8 @@ function designSound(night) {
   const scale = SCALES[scaleKey]
   const hour = night.time.hour
   const lateness = hour >= 19 ? hour - 19 : hour + 5 // 0 at 19:00, 9 at 04:00
-  const crickets = Math.max(0, (lateness < 3 ? 3 : lateness < 6 ? 2 : 1) - (night.conditions.weather === 'fog' ? 1 : 0))
+  // a single cricket at most, and not every night: more likely early in the evening, never in fog
+  const crickets = night.conditions.weather !== 'fog' && r.bool(lateness < 4 ? 0.7 : 0.35) ? 1 : 0
 
   return {
     root,
@@ -96,15 +98,15 @@ function createSound() {
       const loop = keep(
         new Tone.Loop((time) => {
           const r = stream('sound', 'wave', v, wave++)
-          const start = time + r.range(0, 2.5)
+          const start = time + r.range(0, 4)
           const peak = design.sea.level * r.range(0.6, 1.2)
-          const rise = r.range(1.4, 2.6)
-          const fall = r.range(3, 5)
+          const rise = r.range(3.5, 6)
+          const fall = r.range(7, 11)
           gain.gain.cancelScheduledValues(start)
           gain.gain.linearRampToValueAtTime(peak, start + rise)
           gain.gain.linearRampToValueAtTime(peak * 0.2, start + rise + fall)
           filter.frequency.cancelScheduledValues(start)
-          filter.frequency.linearRampToValueAtTime(r.range(700, 1300), start + rise)
+          filter.frequency.linearRampToValueAtTime(r.range(550, 1000), start + rise)
           filter.frequency.linearRampToValueAtTime(300, start + rise + fall)
         }, design.wavePeriod)
       )
@@ -117,7 +119,7 @@ function createSound() {
       const filter = keep(new Tone.Filter(140, 'lowpass'))
       const gain = keep(new Tone.Gain(design.sea.level * 0.5))
       noise.chain(filter, gain, bus)
-      const lfo = keep(new Tone.LFO(0.04, design.sea.level * 0.3, design.sea.level * 0.7).start())
+      const lfo = keep(new Tone.LFO(0.015, design.sea.level * 0.3, design.sea.level * 0.7).start())
       lfo.connect(gain.gain)
     }
 
@@ -130,7 +132,7 @@ function createSound() {
       .forEach((boat, n) => {
         const r = stream('sound', 'generator', n)
         const f0 = r.range(45, 62)
-        const level = Math.min(0.05, 18 / boat.dist)
+        const level = Math.min(0.02, 7 / boat.dist)
         // camera looks along -z, so x is to the right
         const pan = Math.max(-0.9, Math.min(0.9, boat.x / Math.hypot(boat.x, boat.z) * 1.6))
         const filter = keep(new Tone.Filter(160, 'lowpass'))
@@ -156,23 +158,29 @@ function createSound() {
           envelope: { attack: 0.003, decay: 0.03, sustain: 0, release: 0.02 }
         })
       )
-      synth.volume.value = -30
+      synth.volume.value = -36
       const panner = keep(new Tone.Panner(r.range(-0.85, 0.85)).connect(bus))
       synth.connect(panner)
       const pitch = r.range(4200, 5400)
       const pulses = r.int(3, 4)
+      // mostly silent: once in a while a short burst of a few chirps
       let chirp = 0
+      let burst = 0
       const loop = keep(
         new Tone.Loop((time) => {
           const e = stream('sound', 'cricket', c, chirp++)
-          if (e.bool(0.2)) return // a short pause now and then
+          if (burst === 0) {
+            if (!e.bool(0.03)) return
+            burst = e.int(2, 5)
+          }
+          burst--
           for (let k = 0; k < pulses; k++) synth.triggerAttackRelease(pitch, 0.02, time + k * 0.045)
-        }, r.range(0.7, 1.2))
+        }, r.range(0.9, 1.3))
       )
       loop.start(r.range(0, 1))
     }
 
-    // Slow pad: chords from the night's scale, changing every 16 seconds
+    // Slow pad: now and then a chord from the night's scale swells up and fades
     const scaleNote = (degree, octave) => {
       const steps = design.scale
       const d = ((degree % steps.length) + steps.length) % steps.length
@@ -182,20 +190,21 @@ function createSound() {
     const pad = keep(
       new Tone.PolySynth(Tone.AMSynth, {
         oscillator: { type: design.timbre },
-        envelope: { attack: 4, decay: 2, sustain: 0.7, release: 8 },
-        modulationEnvelope: { attack: 6, release: 8 }
+        envelope: { attack: 9, decay: 4, sustain: 0.6, release: 14 },
+        modulationEnvelope: { attack: 10, release: 14 }
       })
     )
-    pad.volume.value = -24
+    pad.volume.value = -30
     pad.connect(bus)
     let chord = 0
     keep(
       new Tone.Loop((time) => {
         const r = stream('sound', 'chord', chord++)
+        if (r.bool(0.45)) return // often just the sea
         const degree = r.int(0, 4)
         const notes = [0, 2, 4].map((k) => noteName(scaleNote(degree + k, 3)))
-        pad.triggerAttackRelease(notes, 14, time, r.range(0.5, 0.8))
-      }, 16).start(0.5)
+        pad.triggerAttackRelease(notes, 24, time, r.range(0.4, 0.7))
+      }, 36).start(2)
     )
 
     // Bells: rare high notes, like glints catching the eye
@@ -207,18 +216,18 @@ function createSound() {
         modulationEnvelope: { attack: 0.002, decay: 0.6, sustain: 0, release: 0.5 }
       })
     )
-    bell.volume.value = -26
+    bell.volume.value = -32
     const bellPan = keep(new Tone.Panner(0).connect(bus))
     bell.connect(bellPan)
-    const bellChance = design.sea.bells + (night.moon.visibility === 'В кадре' ? 0.1 : 0)
+    const bellChance = design.sea.bells + (night.moon.visibility === 'В кадре' ? 0.03 : 0)
     let ring = 0
     keep(
       new Tone.Loop((time) => {
         const r = stream('sound', 'bell', ring++)
         if (!r.bool(bellChance)) return
         bellPan.pan.setValueAtTime(r.range(-0.7, 0.7), time)
-        bell.triggerAttackRelease(noteName(scaleNote(r.int(0, 9), 5)), 1.5, time, r.range(0.3, 0.7))
-      }, 2).start(3)
+        bell.triggerAttackRelease(noteName(scaleNote(r.int(0, 9), 5)), 1.5, time, r.range(0.3, 0.6))
+      }, 4).start(8)
     )
 
     return () => {
