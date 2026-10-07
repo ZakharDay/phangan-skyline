@@ -44,11 +44,13 @@ const PALETTES = {
 
 const PALETTE_NAMES = { green: 'Зелёный', white: 'Белый', mixed: 'Смешанный' }
 
+// The mist layer hugging the water is what swallows the lamp columns: the more humid the night,
+// the shorter the columns, until in fog only the water right under the boats still shines
 const WEATHER = {
-  clear: { name: 'Ясно', weight: 50, humidity: [0.05, 0.15], mist: [0, 0] },
-  haze: { name: 'Дымка', weight: 30, humidity: [0.25, 0.4], mist: [0, 0.15] },
-  humid: { name: 'Влажно', weight: 15, humidity: [0.45, 0.6], mist: [0.2, 0.4] },
-  fog: { name: 'Туман', weight: 5, humidity: [0.65, 0.8], mist: [0.4, 0.7] }
+  clear: { name: 'Ясно', weight: 50, humidity: [0.05, 0.15], mist: [0, 0.03] },
+  haze: { name: 'Дымка', weight: 30, humidity: [0.25, 0.4], mist: [0.07, 0.17] },
+  humid: { name: 'Влажно', weight: 15, humidity: [0.45, 0.6], mist: [0.3, 0.5] },
+  fog: { name: 'Туман', weight: 5, humidity: [0.65, 0.8], mist: [0.65, 0.9] }
 }
 
 const SEA = {
