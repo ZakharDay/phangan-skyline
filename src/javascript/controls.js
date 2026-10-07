@@ -18,6 +18,7 @@ const DEFAULTS = {
   waterLevel: 0.001,
   ripple: 1,
   swell: 1,
+  glints: 1,
 
   brightness: 1,
   halo: 1,
@@ -66,6 +67,7 @@ function createControls(settings, handlers) {
   slider(water, 'waterLevel', 0, 0.03, 0.0005, 'Яркость')
   slider(water, 'ripple', 0, 3, 0.01, 'Рябь')
   slider(water, 'swell', 0, 2, 0.01, 'Зыбь')
+  slider(water, 'glints', 0.05, 5, 0.01, 'Сплошность бликов')
 
   const lights = gui.addFolder('Огни').close()
   slider(lights, 'brightness', 0, 4, 0.01, 'Яркость ламп')

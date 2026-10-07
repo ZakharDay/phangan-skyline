@@ -55,6 +55,7 @@ const fragmentShader = /* glsl */ `
   uniform vec4 uRipple[NR];
   uniform float uSwellGain;
   uniform float uRippleGain;
+  uniform float uGlintDensity; // light-catching facets per square metre of sea
   uniform vec3 uWaterColor;
   uniform vec3 uLightPos[NL];
   uniform vec3 uLightColor[NL];
@@ -94,14 +95,63 @@ const fragmentShader = /* glsl */ `
     lostVar += (1.0 - visible) * s * s * 0.5 * w.xy * w.xy;
   }
 
-  // Anisotropic Beckmann distribution of the sub-pixel facets around the resolved slope.
-  // The ripples run mostly toward the shore, so light paths stretch toward the camera
-  // into long narrow columns.
-  float facets(vec3 H, vec2 slope, vec2 m2) {
-    float hy = max(H.y, 1e-3);
-    vec2 s = -H.xz / hy - slope;
-    float hy2 = hy * hy;
-    return exp(-(s.x * s.x / m2.x + s.y * s.y / m2.y)) / (3.14159265 * sqrt(m2.x * m2.y) * hy2 * hy2);
+  uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+  }
+
+  float cellRandom(ivec2 cell, uint salt) {
+    return float(pcg3d(uvec3(uvec2(cell), salt)).x) / 4294967296.0;
+  }
+
+  // Sparkle cells. Ripples smaller than a pixel don't blur a reflection, they either catch the
+  // lamp or they don't. The sea is split into cells about a pixel in size, a bit wider sideways
+  // so a glint is a short horizontal dash along the crests. Two cell sizes are blended so the
+  // grain doesn't jump with distance.
+  struct Cells {
+    ivec2 id[2];
+    float area[2];
+    uint clock[2];
+    float blend;
+  };
+
+  Cells sparkleCells(vec2 p) {
+    float fx = max(abs(dFdx(p.x)), abs(dFdy(p.x)));
+    float fz = max(abs(dFdx(p.y)), abs(dFdy(p.y)));
+    float sx = exp2(ceil(log2(max(fx * 3.0, 0.02))));
+    float lz = log2(max(fz, 0.01));
+    float lz0 = floor(lz);
+    Cells cells;
+    cells.blend = lz - lz0;
+    for (int k = 0; k < 2; k++) {
+      vec2 size = vec2(sx, exp2(lz0 + float(k)));
+      cells.id[k] = ivec2(floor(p / size));
+      cells.area[k] = size.x * size.y;
+      // each cell flickers on its own clock, a few times a second
+      cells.clock[k] = uint(floor(uTime * 4.0 + cellRandom(cells.id[k], 7u) * 4.0));
+    }
+    return cells;
+  }
+
+  // Turns the smooth facet slope density into countable glints: in each cell the expected
+  // number of facets catching this light is rounded randomly up or down. Close to the lamp
+  // that count is large and the column is solid; farther along it drops below one and the
+  // column breaks into ever sparser sparkles, without getting blurry.
+  float glints(float density, Cells cells, uint light) {
+    float d = 0.0;
+    for (int k = 0; k < 2; k++) {
+      float A = uGlintDensity * cells.area[k];
+      float u = float(pcg3d(uvec3(uvec2(cells.id[k]), cells.clock[k] * 977u + light)).x) / 4294967296.0;
+      d += (k == 0 ? 1.0 - cells.blend : cells.blend) * floor(density * A + u) / A;
+    }
+    return d;
   }
 
   void main() {
@@ -128,7 +178,10 @@ const fragmentShader = /* glsl */ `
     vec3 V = toEye / dist;
 
     float NdV = max(dot(N, V), 1e-3);
-    vec2 m2 = vec2(0.001) + 2.0 * lostVar;
+    // sub-pixel facet slopes, a little less sideways than along the waves
+    vec2 m2 = vec2(0.0006, 0.001) + 2.0 * lostVar;
+    float facetNorm = 1.0 / (3.14159265 * sqrt(m2.x * m2.y));
+    Cells cells = sparkleCells(p);
 
     // Reflected sky. Two samples tilted by the unresolved ripples, so far away the water
     // doesn't turn into a mirror of the bright band right above the horizon.
@@ -146,8 +199,12 @@ const fragmentShader = /* glsl */ `
     // Moon glitter path
     {
       vec3 H = normalize(uMoonDir + V);
+      float hy = max(H.y, 1e-3);
+      vec2 s = -H.xz / hy - slope;
+      float density = exp(-(s.x * s.x / m2.x + s.y * s.y / m2.y)) * facetNorm;
+      float D = glints(density, cells, 1000u) / (hy * hy * hy * hy);
       float F = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
-      color += uMoonLight * 0.1 * facets(H, slope, m2) * F / (4.0 * NdV) * step(0.0, dot(N, uMoonDir));
+      color += uMoonLight * 0.1 * D * F / (4.0 * NdV) * step(0.0, dot(N, uMoonDir));
     }
 
     // Boat lamps: a broken column of light per lamp, and a faint glow in the water around the boat.
@@ -160,7 +217,6 @@ const fragmentShader = /* glsl */ `
     // Near the camera a column can fan out wide, in the middle distance it is always narrow.
     // The bound assumes sideways ripple tilts up to 0.35: the ripples run toward the shore,
     // so even in the strongest breeze here sideways tilts average about 0.08.
-    float facetNorm = 1.0 / (3.14159265 * sqrt(m2.x * m2.y));
     vec2 toPoint = vWorld.xz - cameraPosition.xz;
     float dc = max(length(toPoint), 1.0);
     vec2 viewDir = toPoint / dc;
@@ -182,7 +238,7 @@ const fragmentShader = /* glsl */ `
       if (tiltCost > 16.0 && !inGlow) continue;
 
       float hy2 = hy * hy;
-      float D = exp(-tiltCost) * facetNorm / (hy2 * hy2);
+      float D = glints(exp(-tiltCost) * facetNorm, cells, uint(i)) / (hy2 * hy2);
       float F = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
       float NdL = dot(N, L);
       vec3 E = uLightColor[i] / r2;
@@ -216,6 +272,7 @@ function createWater(atmosphere) {
     uRipple: { value: RIPPLES },
     uSwellGain: { value: 1 },
     uRippleGain: { value: 1 },
+    uGlintDensity: { value: 0.03 },
     uWaterColor: { value: new THREE.Color() },
     uLightPos: { value: lightPos },
     uLightColor: { value: lightColor },

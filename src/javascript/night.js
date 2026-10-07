@@ -55,7 +55,7 @@ const WEATHER = {
 const SEA = {
   calm: { name: 'Штиль', weight: 25, ripple: [0.35, 0.55], swell: 0.4 },
   ripple: { name: 'Рябь', weight: 55, ripple: [0.85, 1.15], swell: 1 },
-  breeze: { name: 'Бриз', weight: 20, ripple: [1.4, 1.8], swell: 1.4 }
+  breeze: { name: 'Бриз', weight: 20, ripple: [1.3, 1.6], swell: 1.3 }
 }
 
 const FLEET = {

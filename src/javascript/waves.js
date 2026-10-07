@@ -1,7 +1,10 @@
 import * as THREE from 'three'
 
-// Waves travel from the horizon toward the shore (+z)
-const WIND_ANGLE = 0.15
+// Waves travel from the horizon toward the shore (+z). The ripples are gentle and spread
+// over a fairly wide fan of directions: gentle so the lamp columns stay short and narrow,
+// spread so the columns stay straight even at the edges of the view, where the camera
+// sees the waves at an angle.
+const WIND_ANGLE = 0
 
 // Seeded RNG so the sea looks the same on every reload
 function mulberry32(seed) {
@@ -22,9 +25,9 @@ function wave(angle, amplitude, wavelength) {
 // Long, low swell — moves the geometry
 const SWELL = [
   wave(0.0, 0.11, 42),
-  wave(0.35, 0.06, 23),
-  wave(-0.45, 0.045, 14),
-  wave(0.8, 0.025, 8.5)
+  wave(0.18, 0.06, 23),
+  wave(-0.22, 0.045, 14),
+  wave(0.3, 0.025, 8.5)
 ]
 
 // Short ripples — only perturb the normals in the fragment shader
@@ -34,8 +37,8 @@ function makeRipples(count) {
   for (let i = 0; i < count; i++) {
     const t = i / (count - 1)
     const wavelength = 5.0 * Math.pow(0.12 / 5.0, t) * (0.85 + rand() * 0.3)
-    const steepness = 0.0055 * (0.7 + rand() * 0.6)
-    const angle = (rand() * 2 - 1) * 0.7
+    const steepness = 0.0012 * (0.7 + rand() * 0.6)
+    const angle = (rand() * 2 - 1) * 0.9
     ripples.push(wave(angle, wavelength * steepness, wavelength))
   }
   return ripples

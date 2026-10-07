@@ -66,6 +66,12 @@ function initOcean() {
     renderer.setSize(width, height)
     camera.aspect = width / height
     camera.updateProjectionMatrix()
+    // The camera stays level and the frame is shifted instead of tilting the camera, like a
+    // shift lens: verticals stay vertical, so the lamp columns on the water run straight down
+    // even at the edges of the view. "Pitch" says how far down the shifted frame looks.
+    const halfFov = THREE.MathUtils.degToRad(camera.fov / 2)
+    camera.projectionMatrix.elements[9] = Math.tan(THREE.MathUtils.degToRad(settings.pitch)) / Math.tan(halfFov)
+    camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert()
     boats.resize(camera, height, renderer.getPixelRatio())
   }
 
@@ -104,6 +110,7 @@ function initOcean() {
     color(water.uniforms.uWaterColor.value, s.waterColor, s.waterLevel)
     water.uniforms.uRippleGain.value = s.ripple
     water.uniforms.uSwellGain.value = s.swell
+    water.uniforms.uGlintDensity.value = 0.03 * s.glints
 
     boats.setBrightness(s.brightness)
     boats.setHalo(s.halo)
@@ -111,7 +118,7 @@ function initOcean() {
     renderer.toneMappingExposure = s.exposure
     camera.fov = s.fov
     camera.position.set(0, s.height, 0)
-    camera.rotation.x = THREE.MathUtils.degToRad(s.pitch)
+    camera.rotation.set(0, 0, 0)
     resize()
   }
 
