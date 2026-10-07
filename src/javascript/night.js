@@ -27,23 +27,22 @@ const ARCHETYPES = {
   pairCyan: { type: 'pair', colors: ['cyan'] },
   pairBlue: { type: 'pair', colors: ['blue'] },
   pairGreen: { type: 'pair', colors: ['green'] },
-  pairWarm: { type: 'pair', colors: ['warm'] },
+  pairWarmGreen: { type: 'pair', colors: ['warm', 'green'] },
   endsGreen: { type: 'ends', colors: ['green'] },
   endsWhite: { type: 'ends', colors: ['white'] },
   rowGreen: { type: 'row', colors: ['green'] },
-  rowGreenWarm: { type: 'row', colors: ['green', 'warm'] },
-  rowWarm: { type: 'row', colors: ['warm', 'red'] }
+  rowGreenWarm: { type: 'row', colors: ['green', 'warm'] }
 }
 
-// Boats from one harbour tend to carry the same kind of lamps
+// Boats from one harbour tend to carry the same kind of lamps.
+// The white-and-red pair is not here: in the photos it is a single boat close under the hill.
 const PALETTES = {
   green: { endsGreen: 3, pairGreen: 3, rowGreen: 2, rowGreenWarm: 1 },
-  white: { pairWhite: 3, pairCyan: 2, endsWhite: 2, pairBlue: 1, pairWhiteRed: 1 },
-  mixed: { pairWhite: 2, endsGreen: 2, rowGreenWarm: 2, pairCyan: 1, pairBlue: 1, pairWhiteRed: 1 },
-  warm: { rowWarm: 2, pairWarm: 2, rowGreenWarm: 1, pairWhiteRed: 1 }
+  white: { pairWhite: 3, pairCyan: 2, endsWhite: 2, pairBlue: 1 },
+  mixed: { pairWhite: 2, endsGreen: 2, rowGreenWarm: 2, pairWarmGreen: 2, pairCyan: 1, pairBlue: 1 }
 }
 
-const PALETTE_NAMES = { green: 'Зелёный', white: 'Белый', mixed: 'Смешанный', warm: 'Тёплый' }
+const PALETTE_NAMES = { green: 'Зелёный', white: 'Белый', mixed: 'Смешанный' }
 
 const WEATHER = {
   clear: { name: 'Ясно', weight: 50, humidity: [0.05, 0.15], mist: [0, 0] },
@@ -190,7 +189,7 @@ function generateNight(hash, source = 'date') {
   const weights = []
   for (let g = 0; g < groupCount; g++) {
     const gr = stream('group', g, 'setup')
-    palettes.push(gr.weighted({ green: 40, white: 30, mixed: 22, warm: 8 }))
+    palettes.push(gr.weighted({ green: 45, white: 32, mixed: 23 }))
     weights.push(gr.range(0.5, 1.5))
   }
   const totalWeight = weights.reduce((a, b) => a + b, 0)
