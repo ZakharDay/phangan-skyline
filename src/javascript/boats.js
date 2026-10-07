@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { mulberry32, swellAt } from './waves.js'
+import { swellAt } from './waves.js'
 import { atmosphereGLSL, MAX_FOG_LIGHTS } from './atmosphere.js'
 import { MAX_REFLECTED_LIGHTS } from './water.js'
 
@@ -27,24 +27,6 @@ const LAMP_COLORS = {
   warm: new THREE.Color(1.0, 0.72, 0.4),
   red: new THREE.Color(1.6, 0.4, 0.2)
 }
-
-const HULL_COLORS = [0x1f4f8f, 0x2f7a4a, 0x8a2a24, 0x2a6f8a, 0x2c3e66]
-
-// Boats picked out of the wide reference photo (2000x1500, horizon at y = 572),
-// nearest first. Pixel positions are turned into distances from the camera height.
-const PHOTO_BOATS = [
-  { px: 420, py: 715, type: 'pair', colors: ['white', 'red'], heading: Math.PI / 2 },
-  { px: 690, py: 625, type: 'pair', colors: ['cyan'] },
-  { px: 1660, py: 626, type: 'ends', colors: ['green'] },
-  { px: 110, py: 633, type: 'ends', colors: ['green'], power: 0.5 },
-  { px: 1940, py: 610, type: 'row', colors: ['green', 'warm'] },
-  { px: 365, py: 602, type: 'pair', colors: ['white'] },
-  { px: 995, py: 596, type: 'pair', colors: ['white', 'cyan'] },
-  { px: 1295, py: 586, type: 'pair', colors: ['blue'] },
-  { px: 325, py: 586, type: 'ends', colors: ['white'] },
-  { px: 1100, py: 582, type: 'ends', colors: ['cyan'] }
-]
-const PHOTO = { width: 2000, horizon: 572, pxPerRad: 1472, tanHalfWidth: 0.679 }
 
 // Lamp power per type: a pair of big lamps, two at the ends, or a row of smaller ones
 const LAMP_POWER = { pair: 4, ends: 3, row: 1.6 }
@@ -169,6 +151,7 @@ const hullFragment = /* glsl */ `
     if (!gl_FrontFacing) N = -N;
 
     vec3 light = uSkyGlow * (0.5 + 0.5 * N.y);
+    light += uMoonLight * max(dot(N, uMoonDir), 0.0) * 0.05;
     vec3 Lv = uLampPos - vWorld;
     float r2 = dot(Lv, Lv);
     light += uLampColor * max(dot(N, Lv * inversesqrt(r2)), 0.0) / (r2 + 1.0);
@@ -250,42 +233,6 @@ const spriteFragment = /* glsl */ `
     #include <colorspace_fragment>
   }
 `
-
-// Where each boat sits and what kind it is
-function layout(settings, cameraHeight) {
-  const rand = mulberry32(21)
-  const boats = []
-
-  PHOTO_BOATS.slice(0, settings.photoBoats).forEach((b) => {
-    const below = (b.py - PHOTO.horizon) / PHOTO.pxPerRad
-    const tanAz = ((b.px - PHOTO.width / 2) / (PHOTO.width / 2)) * PHOTO.tanHalfWidth
-    const dist = cameraHeight / Math.tan(below)
-    boats.push({ ...b, x: dist * tanAz, z: -dist, power: b.power ?? 1 })
-  })
-
-  // A line of lights along the horizon, spread evenly across the view
-  const colors = ['white', 'white', 'cyan', 'cyan', 'green', 'green', 'green', 'blue']
-  const types = ['pair', 'pair', 'ends', 'row']
-  const n = settings.horizonBoats
-  for (let i = 0; i < n; i++) {
-    const az = THREE.MathUtils.degToRad(-50 + (100 * (i + rand())) / n)
-    const dist = 9000 + rand() * 15000
-    const color = colors[Math.floor(rand() * colors.length)]
-    boats.push({
-      x: dist * Math.tan(az),
-      z: -dist,
-      type: types[Math.floor(rand() * types.length)],
-      colors: rand() < 0.2 ? [color, colors[Math.floor(rand() * colors.length)]] : [color],
-      power: 0.7 + rand() * 0.8
-    })
-  }
-
-  boats.forEach((b) => {
-    b.heading ??= rand() * Math.PI * 2
-    b.hullColor = HULL_COLORS[Math.floor(rand() * HULL_COLORS.length)]
-  })
-  return boats
-}
 
 // Local lamp positions for a boat type (bow toward +z)
 function lampLayout(def) {
@@ -424,7 +371,8 @@ function createBoats(atmosphere, water) {
     }
   }
 
-  function rebuild(settings, cameraHeight) {
+  // defs: [{ x, z, type, colors, power, heading, hullColor }] from the night generator
+  function rebuild(defs) {
     root.traverse((o) => {
       if (o.isMesh) o.material.dispose()
     })
@@ -432,7 +380,7 @@ function createBoats(atmosphere, water) {
     if (sprites) sprites.geometry.dispose()
 
     boats = []
-    for (const def of layout(settings, cameraHeight)) boats.push(buildBoat(def))
+    for (const def of defs) boats.push(buildBoat(def))
     boats.sort((a, b) => a.dist - b.dist)
 
     // Reflected lights: per lamp for near boats, per color for the rest
@@ -511,11 +459,11 @@ function createBoats(atmosphere, water) {
 
       for (const r of boat.reflected) {
         const p = water.lightPos[r.slot].copy(r.local).applyMatrix4(m)
-        // sideways reach of the column and its glow: a few degrees, wider up close
+        // horizontal direction and distance from the camera, for the water's quick culling test
         const dx = p.x - camera.position.x
         const dz = p.z - camera.position.z
         const d = Math.hypot(dx, dz)
-        water.lightDir[r.slot].set(dx / d, dz / d, Math.max(0.06, 60 / d))
+        water.lightDir[r.slot].set(dx / d, dz / d, d)
         const k = r.weight * boat.power * WATER_GAIN * brightness
         water.lightColor[r.slot].set(r.color.r * k, r.color.g * k, r.color.b * k)
       }

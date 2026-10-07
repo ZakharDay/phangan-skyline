@@ -26,6 +26,10 @@ function createAtmosphere() {
     uMistHeight: { value: 12 },
     uSkyZenith: { value: new THREE.Color() },
     uSkyGlow: { value: new THREE.Color() },
+    uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
+    uMoonSunDir: { value: new THREE.Vector3(0, -1, 0) },
+    uMoonDisc: { value: new THREE.Color() },
+    uMoonLight: { value: new THREE.Color() },
     uFogLightPos: { value: fogLightPos },
     uFogLightColor: { value: fogLightColor },
     uFogLightCount: { value: 0 }
@@ -41,6 +45,10 @@ const atmosphereGLSL = /* glsl */ `
   uniform float uMistHeight;
   uniform vec3 uSkyZenith;
   uniform vec3 uSkyGlow;
+  uniform vec3 uMoonDir;
+  uniform vec3 uMoonSunDir;
+  uniform vec3 uMoonDisc; // brightness of the lit part of the disc
+  uniform vec3 uMoonLight; // moonlight reaching the scene: lit fraction, faded near the horizon
   uniform vec3 uFogLightPos[NFOG];
   uniform vec3 uFogLightColor[NFOG];
   uniform int uFogLightCount;
@@ -83,16 +91,44 @@ const atmosphereGLSL = /* glsl */ `
     return sum * 0.0795775; // 1 / (4 pi), isotropic
   }
 
+  // Moonlight scattered around the disc: a bright close aureole, a softer ring,
+  // and a wide glow that grows with the humidity
+  vec3 moonGlow(vec3 rd) {
+    float a = length(rd - uMoonDir); // angle from the moon, radians
+    float haze = uHazeDensity * 1e4;
+    return uMoonLight * (
+      0.6 * exp(-a / 0.006) +
+      0.08 * exp(-a / 0.05) +
+      (0.002 + 0.004 * haze) * exp(-a / 0.25)
+    );
+  }
+
+  // The disc itself, lit from the sun's side so the phase faces the right way
+  vec3 moonDisc(vec3 rd) {
+    const float radius = 0.0075;
+    vec3 d = rd - uMoonDir;
+    if (dot(d, d) > radius * radius * 1.5) return vec3(0.0);
+    vec3 side = normalize(cross(vec3(0.0, 1.0, 0.0), uMoonDir));
+    vec3 up = cross(uMoonDir, side);
+    vec2 uv = vec2(dot(d, side), dot(d, up)) / radius;
+    float r = length(uv);
+    vec3 n = side * uv.x + up * uv.y - uMoonDir * sqrt(max(1.0 - r * r, 0.0));
+    float lit = max(dot(n, uMoonSunDir), 0.0) + 0.012; // a little earthshine on the dark part
+    return uMoonDisc * lit * smoothstep(1.0, 0.8, r);
+  }
+
   // Sky along a ray that never hits anything, without the lamps' own glow
   vec3 skyBase(vec3 ro, vec3 rd) {
     float up = max(rd.y, 0.0);
     vec3 background = uSkyZenith * (0.6 + 0.4 * pow(1.0 - up, 3.0));
     float T = exp(-opticalDepth(ro, rd, 2e5));
-    return background * T + uSkyGlow * (1.0 - T);
+    return background * T + uSkyGlow * (1.0 - T) + moonGlow(rd);
   }
 
   vec3 skyRadiance(vec3 ro, vec3 rd) {
-    return skyBase(ro, rd) + lampScatter(ro, rd, 2e5);
+    // haze dims blue more than red, so a low moon turns orange
+    vec3 T = exp(-opticalDepth(ro, rd, 2e5) * vec3(0.6, 1.0, 1.6));
+    return skyBase(ro, rd) + moonDisc(rd) * T + lampScatter(ro, rd, 2e5);
   }
 
   // Dims a surface at distance t and adds the air glowing in front of it

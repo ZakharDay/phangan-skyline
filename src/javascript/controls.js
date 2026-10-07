@@ -1,7 +1,7 @@
 import GUI from 'three/addons/libs/lil-gui.module.min.js'
 
-// Prototype control panel. Tuned values are remembered in this browser;
-// "Copy settings" puts them on the clipboard so they can become the defaults.
+// Prototype control panel. The night (boats, moon, weather, sea) comes from the hash;
+// the sliders are only for tuning on top of it and are reset with every new night.
 
 const DEFAULTS = {
   humidity: 0.12,
@@ -12,14 +12,13 @@ const DEFAULTS = {
   skyZenithLevel: 0.007,
   skyGlow: '#50ccff',
   skyGlowLevel: 0.042,
+  moonGain: 1,
 
   waterColor: '#61dfff',
   waterLevel: 0.001,
   ripple: 1,
   swell: 1,
 
-  photoBoats: 10,
-  horizonBoats: 42,
   brightness: 1,
   halo: 1,
 
@@ -29,36 +28,29 @@ const DEFAULTS = {
   pitch: -7.2
 }
 
-const STORAGE_KEY = 'phangan-skyline-settings'
+const MOON_SOURCES = { 'Дата минта': 'date', 'Номер токена': 'token' }
 
-function loadSettings() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY))
-    return { ...DEFAULTS, ...saved }
-  } catch {
-    return { ...DEFAULTS }
-  }
-}
-
-function saveSettings(settings) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
-  } catch {
-    // storage unavailable, settings just won't persist
-  }
-}
-
-function createControls(settings, onChange) {
+function createControls(settings, handlers) {
   const gui = new GUI({ title: 'Настройки' })
-  const changed = (key) => () => {
-    saveSettings(settings)
-    onChange(key)
-  }
   const slider = (folder, key, min, max, step, name) =>
-    folder.add(settings, key, min, max, step).name(name).onChange(changed(key))
-  const color = (folder, key, name) => folder.addColor(settings, key).name(name).onChange(changed(key))
+    folder.add(settings, key, min, max, step).name(name).onChange(() => handlers.onChange(key))
+  const color = (folder, key, name) =>
+    folder.addColor(settings, key).name(name).onChange(() => handlers.onChange(key))
 
-  const air = gui.addFolder('Атмосфера')
+  const nightFolder = gui.addFolder('Ночь')
+  const nightState = { hash: '', source: 'date' }
+  nightFolder.add(nightState, 'hash').name('Хеш').disable()
+  nightFolder
+    .add(nightState, 'source', MOON_SOURCES)
+    .name('Фаза луны по')
+    .onChange((source) => handlers.onSource(source))
+  nightFolder.add({ next: () => handlers.onNewNight() }, 'next').name('Новая ночь')
+  nightFolder
+    .add({ link: () => navigator.clipboard?.writeText(location.href).catch(() => {}) }, 'link')
+    .name('Скопировать ссылку')
+  let traitsFolder = null
+
+  const air = gui.addFolder('Атмосфера').close()
   slider(air, 'humidity', 0, 1, 0.01, 'Влажность')
   slider(air, 'hazeHeight', 50, 3000, 10, 'Высота дымки, м')
   slider(air, 'mist', 0, 1, 0.01, 'Туман у воды')
@@ -67,20 +59,19 @@ function createControls(settings, onChange) {
   slider(air, 'skyZenithLevel', 0, 0.05, 0.0005, 'Небо: яркость')
   color(air, 'skyGlow', 'Засветка: цвет')
   slider(air, 'skyGlowLevel', 0, 0.2, 0.001, 'Засветка: яркость')
+  slider(air, 'moonGain', 0, 4, 0.01, 'Луна: яркость')
 
-  const water = gui.addFolder('Вода')
+  const water = gui.addFolder('Вода').close()
   color(water, 'waterColor', 'Цвет')
   slider(water, 'waterLevel', 0, 0.03, 0.0005, 'Яркость')
   slider(water, 'ripple', 0, 3, 0.01, 'Рябь')
   slider(water, 'swell', 0, 2, 0.01, 'Зыбь')
 
-  const boats = gui.addFolder('Лодки')
-  slider(boats, 'photoBoats', 0, 10, 1, 'Ближние (с фото)')
-  slider(boats, 'horizonBoats', 0, 80, 1, 'У горизонта')
-  slider(boats, 'brightness', 0, 4, 0.01, 'Яркость ламп')
-  slider(boats, 'halo', 0, 4, 0.01, 'Ореол огней')
+  const lights = gui.addFolder('Огни').close()
+  slider(lights, 'brightness', 0, 4, 0.01, 'Яркость ламп')
+  slider(lights, 'halo', 0, 4, 0.01, 'Ореол огней')
 
-  const camera = gui.addFolder('Камера')
+  const camera = gui.addFolder('Камера').close()
   slider(camera, 'exposure', 0.1, 4, 0.01, 'Экспозиция')
   slider(camera, 'fov', 10, 80, 0.5, 'Угол обзора')
   slider(camera, 'height', 5, 300, 1, 'Высота, м')
@@ -90,7 +81,7 @@ function createControls(settings, onChange) {
     .add(
       {
         copy: () => {
-          const text = JSON.stringify(settings, null, 2)
+          const text = JSON.stringify({ hash: nightState.hash, source: nightState.source, ...settings }, null, 2)
           navigator.clipboard?.writeText(text).catch(() => {})
           console.log(text)
         }
@@ -98,22 +89,20 @@ function createControls(settings, onChange) {
       'copy'
     )
     .name('Скопировать настройки')
+  gui.add({ reset: () => handlers.onReset() }, 'reset').name('Сбросить ползунки')
 
-  gui
-    .add(
-      {
-        reset: () => {
-          Object.assign(settings, DEFAULTS)
-          saveSettings(settings)
-          gui.controllersRecursive().forEach((c) => c.updateDisplay())
-          onChange('all')
-        }
-      },
-      'reset'
-    )
-    .name('Сбросить')
+  function showNight(night) {
+    nightState.hash = night.hash
+    nightState.source = night.source
+    traitsFolder?.destroy()
+    traitsFolder = nightFolder.addFolder('Свойства')
+    for (const [name, value] of Object.entries(night.traits)) {
+      traitsFolder.add({ value }, 'value').name(name).disable()
+    }
+    gui.controllersRecursive().forEach((c) => c.updateDisplay())
+  }
 
-  return gui
+  return { showNight }
 }
 
-export { loadSettings, createControls }
+export { DEFAULTS, createControls }

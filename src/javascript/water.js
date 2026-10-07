@@ -32,9 +32,13 @@ const vertexShader = /* glsl */ `
         d.y += a * sin(f);
       }
       p += d * fade;
+      vWorld = p;
+    #else
+      // the far plane sits a little lower only for depth sorting; it is shaded at sea level
+      // so reflections line up across the seam with the near mesh
+      vWorld = vec3(p.x, 0.0, p.z);
     #endif
 
-    vWorld = p;
     gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
   }
 `
@@ -54,7 +58,7 @@ const fragmentShader = /* glsl */ `
   uniform vec3 uWaterColor;
   uniform vec3 uLightPos[NL];
   uniform vec3 uLightColor[NL];
-  // xy: horizontal direction from the camera to the light, z: how far to the side its light can reach
+  // xy: horizontal direction from the camera to the light, z: horizontal distance to it
   uniform vec3 uLightDir[NL];
   uniform int uLightCount;
 
@@ -139,21 +143,51 @@ const fragmentShader = /* glsl */ `
       color += 0.5 * mix(uWaterColor, skyBase(vWorld, R), fresnel);
     }
 
-    // Boat lamps: a broken column of light per lamp, and a faint glow in the water nearby.
-    // A column runs from the lamp toward the camera, so lamps well off to the side are skipped.
-    vec2 viewDir = normalize(vWorld.xz - cameraPosition.xz);
+    // Moon glitter path
+    {
+      vec3 H = normalize(uMoonDir + V);
+      float F = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
+      color += uMoonLight * 0.1 * facets(H, slope, m2) * F / (4.0 * NdV) * step(0.0, dot(N, uMoonDir));
+    }
+
+    // Boat lamps: a broken column of light per lamp, and a faint glow in the water around the boat.
+    // First the facet tilt this point would need to bounce the lamp into the camera; if the
+    // ripples practically never tilt that far (and the point is outside the boat's own glow),
+    // the lamp is skipped before the expensive part. Only invisible light is dropped, so
+    // no edges appear however wide the columns spread.
+    // A cheap geometric bound goes first: how far to the side of the camera-lamp line the light
+    // can land depends on how far this point is from the camera (dc) and from the lamp (rL).
+    // Near the camera a column can fan out wide, in the middle distance it is always narrow.
+    // The bound assumes sideways ripple tilts up to 0.35: the ripples run toward the shore,
+    // so even in the strongest breeze here sideways tilts average about 0.08.
+    float facetNorm = 1.0 / (3.14159265 * sqrt(m2.x * m2.y));
+    vec2 toPoint = vWorld.xz - cameraPosition.xz;
+    float dc = max(length(toPoint), 1.0);
+    vec2 viewDir = toPoint / dc;
     for (int i = 0; i < NL; i++) {
       if (i >= uLightCount) break;
-      vec3 ld = uLightDir[i];
-      if (abs(viewDir.x * ld.y - viewDir.y * ld.x) > ld.z || dot(viewDir, ld.xy) < 0.0) continue;
       vec3 Lv = uLightPos[i] - vWorld;
       float r2 = dot(Lv, Lv);
-      vec3 L = Lv * inversesqrt(r2);
+      vec3 ld = uLightDir[i];
+      float rL = max(abs(ld.z - dc), 10.0);
+      float maxSide = 0.35 * (cameraPosition.y / dc + 6.0 / rL) / (1.0 + dc / rL);
+      if (r2 > 40000.0 && abs(viewDir.x * ld.y - viewDir.y * ld.x) > maxSide) continue;
+      float invR = inversesqrt(r2);
+      vec3 L = Lv * invR;
       vec3 H = normalize(L + V);
+      float hy = max(H.y, 1e-3);
+      vec2 s = -H.xz / hy - slope;
+      float tiltCost = s.x * s.x / m2.x + s.y * s.y / m2.y;
+      bool inGlow = r2 < 40000.0;
+      if (tiltCost > 16.0 && !inGlow) continue;
+
+      float hy2 = hy * hy;
+      float D = exp(-tiltCost) * facetNorm / (hy2 * hy2);
       float F = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
       float NdL = dot(N, L);
       vec3 E = uLightColor[i] / r2;
-      color += E * (facets(H, slope, m2) * F / (4.0 * NdV) * step(0.0, NdL) + 0.004 * max(NdL, 0.0));
+      float pool = inGlow ? 0.004 * max(NdL, 0.0) * (1.0 - smoothstep(60.0, 200.0, r2 * invR)) : 0.0;
+      color += E * (D * F / (4.0 * NdV) * step(0.0, NdL) + pool);
     }
 
     color = applyAtmosphere(color, cameraPosition, -V, dist);
