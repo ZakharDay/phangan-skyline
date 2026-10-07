@@ -1,52 +1,27 @@
 import * as THREE from 'three'
 import { Sky } from 'three/addons/objects/Sky.js'
+import { NightSky } from './nightSky.js'
+import { SWELL, RIPPLES } from './waves.js'
+import { createBoats, MAX_BOAT_LIGHTS } from './boats.js'
 
 // Sun position: low over the sea, slightly to the right of the view direction
 const SUN_ELEVATION = 7 // degrees
 const SUN_AZIMUTH = 168 // degrees, 180 = straight ahead (-z)
 
-// Waves travel from the horizon toward the shore (+z)
-const WIND_ANGLE = 0.15
+// Moon position for the night mode
+const MOON_ELEVATION = 14
+const MOON_AZIMUTH = 218 // out of frame on the left, so its path doesn't cover the boats
 
-// Seeded RNG so the sea looks the same on every reload
-function mulberry32(seed) {
-  return () => {
-    seed |= 0
-    seed = (seed + 0x6d2b79f5) | 0
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
+// Starting mode; press N to toggle
+const START_NIGHT = true
+
+function skyDirection(elevation, azimuth) {
+  return new THREE.Vector3().setFromSphericalCoords(
+    1,
+    THREE.MathUtils.degToRad(90 - elevation),
+    THREE.MathUtils.degToRad(azimuth)
+  )
 }
-
-function wave(angle, amplitude, wavelength) {
-  const a = WIND_ANGLE + angle
-  return new THREE.Vector4(Math.sin(a), Math.cos(a), amplitude, wavelength)
-}
-
-// Long, low swell — moves the geometry
-const SWELL = [
-  wave(0.0, 0.11, 42),
-  wave(0.35, 0.06, 23),
-  wave(-0.45, 0.045, 14),
-  wave(0.8, 0.025, 8.5)
-]
-
-// Short ripples — only perturb the normals in the fragment shader
-function makeRipples(count) {
-  const rand = mulberry32(7)
-  const ripples = []
-  for (let i = 0; i < count; i++) {
-    const t = i / (count - 1)
-    const wavelength = 5.0 * Math.pow(0.12 / 5.0, t) * (0.85 + rand() * 0.3)
-    const steepness = 0.0055 * (0.7 + rand() * 0.6)
-    const angle = (rand() * 2 - 1) * 1.2
-    ripples.push(wave(angle, wavelength * steepness, wavelength))
-  }
-  return ripples
-}
-
-const RIPPLES = makeRipples(24)
 
 const waterVertex = /* glsl */ `
   #define NS ${SWELL.length}
@@ -85,6 +60,7 @@ const waterVertex = /* glsl */ `
 const waterFragment = /* glsl */ `
   #define NS ${SWELL.length}
   #define NR ${RIPPLES.length}
+  #define NL ${MAX_BOAT_LIGHTS}
 
   uniform float uTime;
   uniform vec4 uSwell[NS];
@@ -92,6 +68,9 @@ const waterFragment = /* glsl */ `
   uniform samplerCube uSky;
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
+  uniform vec3 uLightPos[NL];
+  uniform vec3 uLightColor[NL];
+  uniform int uLightCount;
 
   varying vec3 vWorld;
   varying vec3 vBase;
@@ -174,6 +153,23 @@ const waterFragment = /* glsl */ `
 
     vec3 color = mix(body, sky, fresnel) + spec;
 
+    // Boat lamps: each one leaves a broken column of light on the water
+    // and a faint glow in the water around the boat
+    for (int i = 0; i < NL; i++) {
+      if (i >= uLightCount) break;
+      vec3 Lv = uLightPos[i] - vWorld;
+      float r2 = dot(Lv, Lv);
+      vec3 Ll = Lv * inversesqrt(r2);
+      vec3 Hl = normalize(Ll + V);
+      float nh = max(dot(N, Hl), 1e-3);
+      float nh2 = nh * nh;
+      float Dl = exp((nh2 - 1.0) / (m2 * nh2)) / (3.14159265 * m2 * nh2 * nh2);
+      float Fl = 0.02 + 0.98 * pow(1.0 - max(dot(Hl, V), 0.0), 5.0);
+      float NdL = dot(N, Ll);
+      vec3 E = uLightColor[i] / r2;
+      color += E * (Dl * Fl / (4.0 * NdV) * step(0.0, NdL) + 0.004 * max(NdL, 0.0));
+    }
+
     // Haze toward the horizon, matching the sky right above it
     float dist = length(vWorld - cameraPosition);
     vec3 horizon = textureCube(uSky, normalize(vec3(-V.x, 0.002, -V.z))).rgb;
@@ -196,22 +192,16 @@ function initOcean() {
   renderer.autoClear = false
   container.appendChild(renderer.domElement)
 
-  // Eye height of a person standing on the beach
-  const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 1e6)
-  camera.position.set(0, 1.8, 0)
-  camera.lookAt(0, 1.0, -100)
+  // View from a hillside above the shore through a long lens:
+  // narrow FOV, tilted slightly down so the horizon sits in the upper third
+  const camera = new THREE.PerspectiveCamera(25, 1, 1, 1e6)
+  camera.position.set(0, 40, 0)
+  camera.rotation.x = THREE.MathUtils.degToRad(-3.9)
 
-  // Sky
-  const skyScene = new THREE.Scene()
+  // Day sky
+  const sun = skyDirection(SUN_ELEVATION, SUN_AZIMUTH)
   const sky = new Sky()
   sky.scale.setScalar(450000)
-  skyScene.add(sky)
-
-  const sun = new THREE.Vector3().setFromSphericalCoords(
-    1,
-    THREE.MathUtils.degToRad(90 - SUN_ELEVATION),
-    THREE.MathUtils.degToRad(SUN_AZIMUTH)
-  )
   const skyUniforms = sky.material.uniforms
   skyUniforms.turbidity.value = 2.5
   skyUniforms.rayleigh.value = 1.6
@@ -221,7 +211,32 @@ function initOcean() {
   skyUniforms.cloudDensity.value = 0.35
   skyUniforms.sunPosition.value.copy(sun)
 
+  // Night sky
+  const moon = skyDirection(MOON_ELEVATION, MOON_AZIMUTH)
+  const nightSky = new NightSky()
+  nightSky.scale.setScalar(450000)
+  nightSky.material.uniforms.moonPosition.value.copy(moon)
+
+  // Light that the water reflects as the glitter path, per mode
+  const modes = {
+    day: {
+      sky,
+      lightDir: sun,
+      lightColor: new THREE.Color(1.0, 0.78, 0.52).multiplyScalar(18),
+      exposure: 0.3,
+      lampsOn: false
+    },
+    night: {
+      sky: nightSky,
+      lightDir: moon,
+      lightColor: new THREE.Color(0.75, 0.85, 1.0).multiplyScalar(0.07),
+      exposure: 0.9,
+      lampsOn: true
+    }
+  }
+
   // Sky is rendered into a cube map that the water reflects
+  const skyScene = new THREE.Scene()
   const cubeTarget = new THREE.WebGLCubeRenderTarget(256, {
     type: THREE.HalfFloatType,
     generateMipmaps: true,
@@ -238,8 +253,13 @@ function initOcean() {
     uRipple: { value: RIPPLES },
     uSky: { value: cubeTarget.texture },
     uSunDir: { value: sun },
-    uSunColor: { value: new THREE.Color(1.0, 0.78, 0.52).multiplyScalar(18) }
+    uSunColor: { value: new THREE.Color() }
   }
+
+  const boats = createBoats(uniforms)
+  uniforms.uLightPos = { value: boats.lightPos }
+  uniforms.uLightColor = { value: boats.lightColor }
+  uniforms.uLightCount = { value: boats.lightCount }
 
   // Dense, displaced mesh near the shore
   const nearGeometry = new THREE.PlaneGeometry(1200, 1200, 600, 600)
@@ -270,22 +290,42 @@ function initOcean() {
   )
   far.renderOrder = 0
 
-  waterScene.add(far, near)
+  waterScene.add(far, near, boats.object)
 
   function resize() {
     const { width, height } = container.getBoundingClientRect()
     renderer.setSize(width, height)
     camera.aspect = width / height
     camera.updateProjectionMatrix()
+    boats.resize(camera, height, renderer.getPixelRatio())
   }
   window.addEventListener('resize', resize)
   resize()
+
+  let current = null
+  function setMode(name) {
+    const mode = modes[name]
+    if (current) skyScene.remove(current.sky)
+    skyScene.add(mode.sky)
+    uniforms.uSunDir.value = mode.lightDir
+    uniforms.uSunColor.value.copy(mode.lightColor)
+    renderer.toneMappingExposure = mode.exposure
+    boats.setLightsOn(mode.lampsOn)
+    current = mode
+  }
+  setMode(START_NIGHT ? 'night' : 'day')
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyN') setMode(current === modes.night ? 'day' : 'night')
+  })
 
   const clock = new THREE.Clock()
   renderer.setAnimationLoop(() => {
     const t = clock.getElapsedTime()
     uniforms.uTime.value = t
     skyUniforms.time.value = t
+    nightSky.material.uniforms.time.value = t
+    boats.update(t)
 
     // Clouds drift, so refresh the reflection every frame (cheap at 256px)
     cubeCamera.update(renderer, skyScene)
