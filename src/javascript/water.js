@@ -120,6 +120,7 @@ const fragmentShader = /* glsl */ `
     float area[2];
     uint clock[2];
     float blend;
+    float sharpness; // 1 in clear air, toward 0 when haze between the camera and the water blurs the glints
   };
 
   Cells sparkleCells(vec2 p) {
@@ -151,7 +152,9 @@ const fragmentShader = /* glsl */ `
       float u = float(pcg3d(uvec3(uvec2(cells.id[k]), cells.clock[k] * 977u + light)).x) / 4294967296.0;
       d += (k == 0 ? 1.0 - cells.blend : cells.blend) * floor(density * A + u) / A;
     }
-    return d;
+    // Haze scatters each glint slightly forward and softens it into a small glow: the sparks
+    // melt back into their smooth average, same brightness on the whole, without sharp peaks
+    return mix(density, d, cells.sharpness);
   }
 
   void main() {
@@ -182,6 +185,7 @@ const fragmentShader = /* glsl */ `
     vec2 m2 = vec2(0.0006, 0.001) + 2.0 * lostVar;
     float facetNorm = 1.0 / (3.14159265 * sqrt(m2.x * m2.y));
     Cells cells = sparkleCells(p);
+    cells.sharpness = exp(-2.0 * opticalDepth(cameraPosition, -V, dist));
 
     // Reflected sky. Two samples tilted by the unresolved ripples, so far away the water
     // doesn't turn into a mirror of the bright band right above the horizon.
@@ -241,7 +245,9 @@ const fragmentShader = /* glsl */ `
       float D = glints(exp(-tiltCost) * facetNorm, cells, uint(i)) / (hy2 * hy2);
       float F = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
       float NdL = dot(N, L);
-      vec3 E = uLightColor[i] / r2;
+      // the lamp's light is dimmed on its way to this point, mostly by the mist hugging the
+      // water: in fog only the water right under the boat still catches it
+      vec3 E = uLightColor[i] / r2 * exp(-opticalDepth(vWorld, L, r2 * invR));
       float pool = inGlow ? 0.004 * max(NdL, 0.0) * (1.0 - smoothstep(60.0, 200.0, r2 * invR)) : 0.0;
       color += E * (D * F / (4.0 * NdV) * step(0.0, NdL) + pool);
     }
