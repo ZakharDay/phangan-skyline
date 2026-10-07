@@ -35,7 +35,7 @@ function makeRipples(count) {
     const t = i / (count - 1)
     const wavelength = 5.0 * Math.pow(0.12 / 5.0, t) * (0.85 + rand() * 0.3)
     const steepness = 0.0055 * (0.7 + rand() * 0.6)
-    const angle = (rand() * 2 - 1) * 1.2
+    const angle = (rand() * 2 - 1) * 0.7
     ripples.push(wave(angle, wavelength * steepness, wavelength))
   }
   return ripples

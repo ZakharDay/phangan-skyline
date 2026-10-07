@@ -1,32 +1,54 @@
 import * as THREE from 'three'
 import { mulberry32, swellAt } from './waves.js'
+import { atmosphereGLSL, MAX_FOG_LIGHTS } from './atmosphere.js'
+import { MAX_REFLECTED_LIGHTS } from './water.js'
 
-// Thai squid-fishing boats: wooden hull, cabin aft, and rows of bright lamps
-// hung on booms over the deck to lure squid at night.
-
-const MAX_BOAT_LIGHTS = 48
+// Thai squid-fishing boats: wooden hull, cabin aft, long net poles over the side,
+// and a few very bright lamps that lure squid at night.
 
 const BOAT_LENGTH = 16
 const BOAT_BEAM = 4.2
-const LAMPS_PER_ROW = 6
 
-// Brightness of the lamp sprites, of their reflection on the water
-// and of the light they cast on their own hull
-const SPRITE_GAIN = 40
-const WATER_GAIN = 5
+// Brightness of the lamp sprites, of their reflection on the water,
+// of the glow they make in the humid air, and of the light on their own hull
+const SPRITE_GAIN = 25
+const WATER_GAIN = 1000
+const FOG_GAIN = 1500
 const HULL_GAIN = 2
+
+// Boats closer than this get a reflection column per lamp, farther ones one per color
+const PER_LAMP_REFLECTION_DISTANCE = 5000
 
 const LAMP_COLORS = {
   green: new THREE.Color(0.25, 1.0, 0.42),
-  white: new THREE.Color(0.8, 0.95, 1.0),
+  white: new THREE.Color(0.85, 0.97, 1.0),
   cyan: new THREE.Color(0.55, 0.95, 1.0),
-  warm: new THREE.Color(1.0, 0.8, 0.55),
-  red: new THREE.Color(1.0, 0.28, 0.16)
+  blue: new THREE.Color(0.45, 0.62, 1.0),
+  warm: new THREE.Color(1.0, 0.72, 0.4),
+  red: new THREE.Color(1.6, 0.4, 0.2)
 }
 
 const HULL_COLORS = [0x1f4f8f, 0x2f7a4a, 0x8a2a24, 0x2a6f8a, 0x2c3e66]
 
-// Hull shape along its length, t = 0 at the stern, t = 1 at the bow
+// Boats picked out of the wide reference photo (2000x1500, horizon at y = 572),
+// nearest first. Pixel positions are turned into distances from the camera height.
+const PHOTO_BOATS = [
+  { px: 420, py: 715, type: 'pair', colors: ['white', 'red'], heading: Math.PI / 2 },
+  { px: 690, py: 625, type: 'pair', colors: ['cyan'] },
+  { px: 1660, py: 626, type: 'ends', colors: ['green'] },
+  { px: 110, py: 633, type: 'ends', colors: ['green'], power: 0.5 },
+  { px: 1940, py: 610, type: 'row', colors: ['green', 'warm'] },
+  { px: 365, py: 602, type: 'pair', colors: ['white'] },
+  { px: 995, py: 596, type: 'pair', colors: ['white', 'cyan'] },
+  { px: 1295, py: 586, type: 'pair', colors: ['blue'] },
+  { px: 325, py: 586, type: 'ends', colors: ['white'] },
+  { px: 1100, py: 582, type: 'ends', colors: ['cyan'] }
+]
+const PHOTO = { width: 2000, horizon: 572, pxPerRad: 1472, tanHalfWidth: 0.679 }
+
+// Lamp power per type: a pair of big lamps, two at the ends, or a row of smaller ones
+const LAMP_POWER = { pair: 4, ends: 3, row: 1.6 }
+
 function hullStation(t) {
   const bow = 1 - Math.pow(Math.max(t - 0.5, 0) / 0.5, 1.7)
   const stern = 0.85 + 0.15 * Math.min(t / 0.1, 1)
@@ -40,6 +62,10 @@ function hullStation(t) {
 
 const BULWARK = 0.4
 
+function deckHeight(t) {
+  return hullStation(t).sheer - BULWARK
+}
+
 function hullGeometry() {
   const ST = 32
   const SEG = 14
@@ -51,11 +77,7 @@ function hullGeometry() {
     const s = hullStation(i / ST)
     for (let j = 0; j <= SEG; j++) {
       const a = (j / SEG - 0.5) * Math.PI
-      pos.push(
-        s.halfBeam * Math.sin(a),
-        s.keel + (s.sheer - s.keel) * (1 - Math.cos(a)),
-        s.z
-      )
+      pos.push(s.halfBeam * Math.sin(a), s.keel + (s.sheer - s.keel) * (1 - Math.cos(a)), s.z)
     }
   }
   for (let i = 0; i < ST; i++) {
@@ -116,11 +138,6 @@ function deckGeometry() {
   return g
 }
 
-function deckHeight(t) {
-  const s = hullStation(t)
-  return s.sheer - BULWARK
-}
-
 const hullVertex = /* glsl */ `
   varying vec3 vWorld;
   varying vec3 vNormal;
@@ -133,12 +150,11 @@ const hullVertex = /* glsl */ `
   }
 `
 
-// Lit by the sky, the sun or moon, and the boat's own lamps
+// Lit by the glowing sky and the boat's own lamps, then seen through the haze
 const hullFragment = /* glsl */ `
+  ${atmosphereGLSL}
+
   uniform vec3 uColor;
-  uniform samplerCube uSky;
-  uniform vec3 uSunDir;
-  uniform vec3 uSunColor;
   uniform vec3 uLampPos;
   uniform vec3 uLampColor;
 
@@ -146,30 +162,32 @@ const hullFragment = /* glsl */ `
   varying vec3 vNormal;
 
   void main() {
-    // the part under water is hidden by the far water plane, which doesn't write depth
+    // the part under water would show through the water planes
     if (vWorld.y < 0.0) discard;
 
     vec3 N = normalize(vNormal);
     if (!gl_FrontFacing) N = -N;
 
-    vec3 sky = textureCube(uSky, vec3(0.0, 1.0, 0.0)).rgb;
-    vec3 light = sky * (0.55 + 0.45 * N.y);
-    light += uSunColor * max(dot(N, normalize(uSunDir)), 0.0) / 3.14159;
-
+    vec3 light = uSkyGlow * (0.5 + 0.5 * N.y);
     vec3 Lv = uLampPos - vWorld;
     float r2 = dot(Lv, Lv);
     light += uLampColor * max(dot(N, Lv * inversesqrt(r2)), 0.0) / (r2 + 1.0);
 
-    gl_FragColor = vec4(uColor * light, 1.0);
+    vec3 toEye = cameraPosition - vWorld;
+    float dist = length(toEye);
+    vec3 color = applyAtmosphere(uColor * light, cameraPosition, -toEye / dist, dist);
+
+    gl_FragColor = vec4(color, 1.0);
 
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
 `
 
-// Lamp sprites: a tiny bright core with a halo and lens star spikes,
-// sized by how much light actually reaches the camera
+// Lamp sprites: a small bright core and a soft halo that swells in humid air
 const spriteVertex = /* glsl */ `
+  ${atmosphereGLSL}
+
   attribute vec3 aColor;
   attribute float aPower;
 
@@ -180,44 +198,51 @@ const spriteVertex = /* glsl */ `
   varying vec3 vColor;
   varying float vEnergy;
   varying float vSize;
+  varying float vHaze;
 
   void main() {
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    float d = -mv.z;
-    vEnergy = uGain * aPower / (d * d) * uPxPerRad * uPxPerRad * exp(-d / 30000.0);
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vec3 toLamp = wp.xyz - cameraPosition;
+    float d = length(toLamp);
+    float tau = opticalDepth(cameraPosition, toLamp / d, d);
+
+    vEnergy = uGain * aPower / (d * d) * uPxPerRad * uPxPerRad * exp(-tau);
+    vHaze = tau;
     vColor = aColor;
-    float radius = 5.0 * log(max(sqrt(vEnergy), 1.0)) + 4.0;
-    vSize = clamp(2.0 * radius, 8.0, 96.0) * uPx;
+
+    float spread = 1.0 + 0.6 * min(tau, 4.0);
+    float radius = (4.0 + 3.0 * log(1.0 + sqrt(vEnergy))) * spread;
+    vSize = clamp(2.0 * radius, 6.0, 160.0) * uPx;
     gl_PointSize = vSize;
-    gl_Position = projectionMatrix * mv;
+    gl_Position = projectionMatrix * viewMatrix * wp;
   }
 `
 
 const spriteFragment = /* glsl */ `
   uniform float uPx;
+  uniform float uHalo;
 
   varying vec3 vColor;
   varying float vEnergy;
   varying float vSize;
+  varying float vHaze;
 
   void main() {
     vec2 q = (gl_PointCoord - 0.5) * vSize / uPx; // offset in CSS pixels
     float r = length(q);
 
-    float sig = 0.7;
+    float sig = 0.8;
     float core = vEnergy / (6.2832 * sig * sig) * exp(-r * r / (2.0 * sig * sig));
-    // halo and spikes grow slower than the core, like a lens glare
+
+    // the halo grows slower than the core, and spreads out in haze
     float glare = sqrt(vEnergy);
-    float halo = glare * (0.05 * exp(-r / 1.5) + 0.004 * exp(-r / 6.0));
+    float spread = 1.0 + 0.6 * min(vHaze, 4.0);
+    float halo = glare * uHalo * (0.06 * exp(-r / 1.6) + 0.004 * spread * exp(-r / (3.0 * spread)));
 
-    // 8-ray star
-    float a = atan(q.y, q.x);
-    float toRay = mod(a + 0.3927, 0.7854) - 0.3927;
-    float perp = r * abs(sin(toRay));
-    float spikes = glare * 0.05 * exp(-perp * perp / 0.3) * exp(-r / 4.0);
-
-    vec3 col = mix(vColor, vec3(1.0), 0.5) * core + vColor * (halo + spikes);
-    col *= smoothstep(0.5, 0.4, length(gl_PointCoord - 0.5));
+    // fade to zero before the sprite edge so no square or disc outline shows
+    float edge = clamp(length(gl_PointCoord - 0.5) * 2.0, 0.0, 1.0);
+    float window = (1.0 - edge * edge) * (1.0 - edge * edge);
+    vec3 col = (mix(vColor, vec3(1.0), 0.5) * core + vColor * halo) * window;
 
     gl_FragColor = vec4(col, 1.0);
 
@@ -226,51 +251,106 @@ const spriteFragment = /* glsl */ `
   }
 `
 
-function layout() {
+// Where each boat sits and what kind it is
+function layout(settings, cameraHeight) {
   const rand = mulberry32(21)
+  const boats = []
 
-  // A few boats close enough to see the hull, like in the photo
-  const boats = [
-    { x: -70, z: -330, heading: 1.25, colors: ['red', 'green'], power: 1 },
-    { x: 160, z: -720, heading: -1.9, colors: ['cyan'], power: 1 },
-    { x: -330, z: -1350, heading: 1.8, colors: ['green'], power: 1.2 }
-  ]
+  PHOTO_BOATS.slice(0, settings.photoBoats).forEach((b) => {
+    const below = (b.py - PHOTO.horizon) / PHOTO.pxPerRad
+    const tanAz = ((b.px - PHOTO.width / 2) / (PHOTO.width / 2)) * PHOTO.tanHalfWidth
+    const dist = cameraHeight / Math.tan(below)
+    boats.push({ ...b, x: dist * tanAz, z: -dist, power: b.power ?? 1 })
+  })
 
-  const palette = ['green', 'green', 'green', 'white', 'cyan', 'warm']
-  const scatter = (count, near, far, spread) => {
-    for (let i = 0; i < count; i++) {
-      const z = -(near + rand() * (far - near))
-      const color = palette[Math.floor(rand() * palette.length)]
-      boats.push({
-        x: (rand() * 2 - 1) * spread * -z,
-        z,
-        heading: rand() * Math.PI * 2,
-        colors: [color],
-        power: 1 + rand() * 1.5
-      })
-    }
+  // A line of lights along the horizon, spread evenly across the view
+  const colors = ['white', 'white', 'cyan', 'cyan', 'green', 'green', 'green', 'blue']
+  const types = ['pair', 'pair', 'ends', 'row']
+  const n = settings.horizonBoats
+  for (let i = 0; i < n; i++) {
+    const az = THREE.MathUtils.degToRad(-50 + (100 * (i + rand())) / n)
+    const dist = 9000 + rand() * 15000
+    const color = colors[Math.floor(rand() * colors.length)]
+    boats.push({
+      x: dist * Math.tan(az),
+      z: -dist,
+      type: types[Math.floor(rand() * types.length)],
+      colors: rand() < 0.2 ? [color, colors[Math.floor(rand() * colors.length)]] : [color],
+      power: 0.7 + rand() * 0.8
+    })
   }
-  scatter(5, 2000, 5000, 0.35) // middle distance
-  scatter(18, 7000, 22000, 0.42) // a line of lights along the horizon
 
+  boats.forEach((b) => {
+    b.heading ??= rand() * Math.PI * 2
+    b.hullColor = HULL_COLORS[Math.floor(rand() * HULL_COLORS.length)]
+  })
   return boats
 }
 
-function createBoats(shared) {
+// Local lamp positions for a boat type (bow toward +z)
+function lampLayout(def) {
+  const L = BOAT_LENGTH
+  const y = deckHeight(0.5) + 3.0
+  const color = (i) => def.colors[i % def.colors.length]
+  if (def.type === 'row') {
+    return Array.from({ length: 7 }, (_, i) => ({
+      local: new THREE.Vector3(0, y, L * (-0.3 + (0.65 * i) / 6)),
+      color: color(i)
+    }))
+  }
+  if (def.type === 'ends') {
+    return [
+      { local: new THREE.Vector3(0, y, L * -0.3), color: color(0) },
+      { local: new THREE.Vector3(0, y + 0.5, L * 0.36), color: color(1) }
+    ]
+  }
+  return [
+    { local: new THREE.Vector3(0, y, L * 0.12), color: color(0) },
+    { local: new THREE.Vector3(0, y, L * 0.12 - 5), color: color(1) }
+  ]
+}
+
+function createBoats(atmosphere, water) {
   const root = new THREE.Group()
   const hullGeo = hullGeometry()
   const deckGeo = deckGeometry()
   const boxGeo = new THREE.BoxGeometry(1, 1, 1)
   const poleGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 6)
+  poleGeo.translate(0, 0.5, 0) // grows from its base along +y
 
-  const lampLocal = []
-  const lampColors = []
-  const lampPowers = []
+  const spriteUniforms = {
+    ...atmosphere,
+    uPxPerRad: { value: 1000 },
+    uPx: { value: 1 },
+    uGain: { value: SPRITE_GAIN },
+    uHalo: { value: 1 }
+  }
+  const spriteMaterial = new THREE.ShaderMaterial({
+    uniforms: spriteUniforms,
+    vertexShader: spriteVertex,
+    fragmentShader: spriteFragment,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: false,
+    transparent: true
+  })
 
-  const lightPos = []
-  const lightColor = []
+  let boats = []
+  let sprites = null
+  let positions = null
+  let positionAttr = null
+  let brightness = 1
 
-  const boats = layout().map((def, n) => {
+  function material(hex, lampUniforms) {
+    return new THREE.ShaderMaterial({
+      uniforms: { ...atmosphere, uColor: { value: new THREE.Color(hex) }, ...lampUniforms },
+      vertexShader: hullVertex,
+      fragmentShader: hullFragment,
+      side: THREE.DoubleSide
+    })
+  }
+
+  function buildBoat(def) {
     const group = new THREE.Group()
     group.position.set(def.x, 0, def.z)
     root.add(group)
@@ -279,181 +359,187 @@ function createBoats(shared) {
       uLampPos: { value: new THREE.Vector3() },
       uLampColor: { value: new THREE.Color() }
     }
-    const material = (hex) =>
-      new THREE.ShaderMaterial({
-        uniforms: {
-          uColor: { value: new THREE.Color(hex) },
-          uSky: shared.uSky,
-          uSunDir: shared.uSunDir,
-          uSunColor: shared.uSunColor,
-          ...lampUniforms
-        },
-        vertexShader: hullVertex,
-        fragmentShader: hullFragment,
-        side: THREE.DoubleSide
-      })
-
-    const part = (geo, hex, sx, sy, sz, x, y, z) => {
-      const m = new THREE.Mesh(geo, material(hex))
-      m.scale.set(sx, sy, sz)
-      m.position.set(x, y, z)
+    const add = (geo, hex) => {
+      const m = new THREE.Mesh(geo, material(hex, lampUniforms))
       m.renderOrder = 2
       group.add(m)
       return m
     }
+    const box = (hex, sx, sy, sz, x, y, z) => {
+      const m = add(boxGeo, hex)
+      m.scale.set(sx, sy, sz)
+      m.position.set(x, y, z)
+    }
+    const pole = (hex, radius, from, to) => {
+      const m = add(poleGeo, hex)
+      const dir = new THREE.Vector3().subVectors(to, from)
+      m.scale.set(radius * 2, dir.length(), radius * 2)
+      m.position.copy(from)
+      m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize())
+    }
 
-    const hull = new THREE.Mesh(hullGeo, material(HULL_COLORS[n % HULL_COLORS.length]))
-    hull.renderOrder = 2
-    group.add(hull)
-    const deck = new THREE.Mesh(deckGeo, material(0x6e5238))
-    deck.renderOrder = 2
-    group.add(deck)
+    add(hullGeo, def.hullColor)
+    add(deckGeo, 0x6e5238)
 
-    // Cabin with roof aft, masts, and two booms carrying the lamps
+    // Cabin aft, mast, a lamp boom along the deck, and two long net poles over the port side
     const L = BOAT_LENGTH
     const cabinDeck = deckHeight(0.2)
-    part(boxGeo, 0xe6e1d3, 2.8, 2.0, 3.6, 0, cabinDeck + 1.0, -L * 0.28)
-    part(boxGeo, 0x2b5f9e, 3.2, 0.15, 4.2, 0, cabinDeck + 2.07, -L * 0.28)
-    part(poleGeo, 0x3a3a3a, 0.16, 7.5, 0.16, 0, deckHeight(0.65) + 3.75, L * 0.15)
-    part(poleGeo, 0x3a3a3a, 0.12, 3.5, 0.12, 0, cabinDeck + 3.8, -L * 0.25)
-    const boomY = 4.4
-    for (const side of [-1, 1]) {
-      part(boxGeo, 0x3a3a3a, 0.08, 0.08, L * 0.66, side * 1.15, boomY, L * 0.06)
+    box(0xe6e1d3, 2.8, 2.0, 3.6, 0, cabinDeck + 1.0, -L * 0.28)
+    box(0x2b5f9e, 3.2, 0.15, 4.2, 0, cabinDeck + 2.07, -L * 0.28)
+    const mastBase = new THREE.Vector3(0, deckHeight(0.65), L * 0.15)
+    pole(0x3a3a3a, 0.08, mastBase, mastBase.clone().add(new THREE.Vector3(0, 7, 0)))
+    const boomY = deckHeight(0.5) + 3.3
+    box(0x3a3a3a, 0.08, 0.08, L * 0.7, 0, boomY, L * 0.03)
+    for (const t of [0.75, 0.35]) {
+      const from = new THREE.Vector3(-1.5, deckHeight(t) + 0.8, (t - 0.5) * L)
+      const to = from.clone().add(new THREE.Vector3(-10, -0.6, 3.5))
+      pole(0xcfc6a8, 0.06, from, to)
     }
 
-    // Lamps hang just under the booms
-    const lamps = []
-    // colors are spread along the boat from stern to bow
-    for (const side of [-1, 1]) {
-      for (let i = 0; i < LAMPS_PER_ROW; i++) {
-        const colorName = def.colors[Math.floor((i / LAMPS_PER_ROW) * def.colors.length)]
-        const z = L * (-0.25 + (0.63 * i) / (LAMPS_PER_ROW - 1))
-        lamps.push({ local: new THREE.Vector3(side * 1.15, boomY - 0.3, z), colorName })
-        lampLocal.push(lamps[lamps.length - 1].local)
-        lampColors.push(LAMP_COLORS[colorName])
-        lampPowers.push(def.power)
-      }
-    }
+    const lamps = lampLayout(def)
+    // small red navigation light on the port bow
+    const nav = { local: new THREE.Vector3(-1.6, deckHeight(0.85) + 0.6, L * 0.35), color: 'red' }
 
-    // One reflected light per lamp color, so the water loop stays short
-    const groups = {}
-    for (const lamp of lamps) {
-      groups[lamp.colorName] ??= { count: 0, centroid: new THREE.Vector3() }
-      groups[lamp.colorName].count++
-      groups[lamp.colorName].centroid.add(lamp.local)
+    const center = new THREE.Vector3()
+    const tint = new THREE.Color()
+    for (const l of lamps) {
+      center.add(l.local)
+      tint.add(LAMP_COLORS[l.color])
     }
-    const reflected = Object.entries(groups)
-      .filter(() => lightPos.length < MAX_BOAT_LIGHTS)
-      .map(([colorName, g]) => {
-        const slot = lightPos.length
-        lightPos.push(new THREE.Vector3())
-        lightColor.push(new THREE.Vector3())
-        return {
-          slot,
-          local: g.centroid.divideScalar(g.count),
-          color: LAMP_COLORS[colorName].clone().multiplyScalar(g.count * def.power * WATER_GAIN)
-        }
-      })
-
-    const lampCenter = new THREE.Vector3()
-    const lampTint = new THREE.Color()
-    for (const lamp of lamps) {
-      lampCenter.add(lamp.local)
-      lampTint.add(LAMP_COLORS[lamp.colorName])
-    }
-    lampCenter.divideScalar(lamps.length)
-    lampTint.multiplyScalar(def.power * HULL_GAIN)
+    center.divideScalar(lamps.length)
+    const power = LAMP_POWER[def.type] * def.power
 
     return {
       def,
       group,
       lamps,
-      reflected,
+      nav,
+      power,
+      center,
+      tint: tint.multiplyScalar(power),
       lampUniforms,
-      lampCenter,
-      lampTint,
+      dist: Math.hypot(def.x, def.z),
       yaw: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), def.heading),
-      phase: n * 1.7
+      phase: boats.length * 1.7
     }
-  })
-
-  // Pad the uniform arrays to their declared size
-  while (lightPos.length < MAX_BOAT_LIGHTS) {
-    lightPos.push(new THREE.Vector3())
-    lightColor.push(new THREE.Vector3())
   }
-  const lightCount = boats.reduce((n, b) => n + b.reflected.length, 0)
 
-  // Lamp sprites
-  const positions = new Float32Array(lampLocal.length * 3)
-  const colors = new Float32Array(lampLocal.length * 3)
-  lampColors.forEach((c, i) => c.toArray(colors, i * 3))
-  const spriteGeo = new THREE.BufferGeometry()
-  const positionAttr = new THREE.BufferAttribute(positions, 3)
-  positionAttr.setUsage(THREE.DynamicDrawUsage)
-  spriteGeo.setAttribute('position', positionAttr)
-  spriteGeo.setAttribute('aColor', new THREE.BufferAttribute(colors, 3))
-  spriteGeo.setAttribute('aPower', new THREE.Float32BufferAttribute(lampPowers, 1))
-
-  const spriteUniforms = {
-    uPxPerRad: { value: 1000 },
-    uPx: { value: 1 },
-    uGain: { value: SPRITE_GAIN }
-  }
-  const sprites = new THREE.Points(
-    spriteGeo,
-    new THREE.ShaderMaterial({
-      uniforms: spriteUniforms,
-      vertexShader: spriteVertex,
-      fragmentShader: spriteFragment,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      depthTest: false,
-      transparent: true
+  function rebuild(settings, cameraHeight) {
+    root.traverse((o) => {
+      if (o.isMesh) o.material.dispose()
     })
-  )
-  sprites.frustumCulled = false
-  sprites.renderOrder = 3
-  root.add(sprites)
+    root.clear()
+    if (sprites) sprites.geometry.dispose()
 
-  let lightsOn = 1
+    boats = []
+    for (const def of layout(settings, cameraHeight)) boats.push(buildBoat(def))
+    boats.sort((a, b) => a.dist - b.dist)
+
+    // Reflected lights: per lamp for near boats, per color for the rest
+    let slot = 0
+    for (const boat of boats) {
+      boat.reflected = []
+      const groups =
+        boat.dist < PER_LAMP_REFLECTION_DISTANCE
+          ? boat.lamps.map((l) => ({ color: l.color, locals: [l.local] }))
+          : Object.values(
+              boat.lamps.reduce((acc, l) => {
+                acc[l.color] ??= { color: l.color, locals: [] }
+                acc[l.color].locals.push(l.local)
+                return acc
+              }, {})
+            )
+      for (const g of groups) {
+        if (slot >= MAX_REFLECTED_LIGHTS) break
+        const local = g.locals
+          .reduce((a, l) => a.add(l), new THREE.Vector3())
+          .divideScalar(g.locals.length)
+        boat.reflected.push({ slot: slot++, local, color: LAMP_COLORS[g.color], weight: g.locals.length })
+      }
+    }
+    water.uniforms.uLightCount.value = slot
+
+    // Glow in the air: the nearest boats, one light each
+    atmosphere.uFogLightCount.value = Math.min(boats.length, MAX_FOG_LIGHTS)
+
+    // Lamp sprites, navigation lights included
+    const all = boats.flatMap((b) => [
+      ...b.lamps.map((l) => ({ l, power: b.power })),
+      { l: b.nav, power: 0.03 }
+    ])
+    positions = new Float32Array(all.length * 3)
+    const colors = new Float32Array(all.length * 3)
+    const powers = new Float32Array(all.length)
+    all.forEach(({ l, power }, i) => {
+      LAMP_COLORS[l.color].toArray(colors, i * 3)
+      powers[i] = power
+    })
+    const geo = new THREE.BufferGeometry()
+    positionAttr = new THREE.BufferAttribute(positions, 3)
+    positionAttr.setUsage(THREE.DynamicDrawUsage)
+    geo.setAttribute('position', positionAttr)
+    geo.setAttribute('aColor', new THREE.BufferAttribute(colors, 3))
+    geo.setAttribute('aPower', new THREE.BufferAttribute(powers, 1))
+    sprites = new THREE.Points(geo, spriteMaterial)
+    sprites.frustumCulled = false
+    sprites.renderOrder = 3
+    root.add(sprites)
+  }
+
   const up = new THREE.Vector3(0, 1, 0)
   const normal = new THREE.Vector3()
   const tilt = new THREE.Quaternion()
   const v = new THREE.Vector3()
 
-  function update(t) {
-    let lamp = 0
-    for (const boat of boats) {
+  function update(t, swellGain, camera) {
+    let i = 0
+    boats.forEach((boat, n) => {
       const { x, z } = boat.def
 
       // Ride the swell; a long hull averages out the short waves a bit
       const s = swellAt(x, z, t)
       const sway = 0.012 * Math.sin(t * 0.7 + boat.phase)
-      normal.set(-s.sx * 0.7 + sway, 1, -s.sz * 0.7).normalize()
+      normal.set(-s.sx * swellGain * 0.7 + sway, 1, -s.sz * swellGain * 0.7).normalize()
       tilt.setFromUnitVectors(up, normal)
       boat.group.quaternion.copy(tilt).multiply(boat.yaw)
-      boat.group.position.y = s.h
+      boat.group.position.y = s.h * swellGain
       boat.group.updateMatrixWorld()
-
       const m = boat.group.matrixWorld
-      for (const l of boat.lamps) {
-        v.copy(l.local).applyMatrix4(m).toArray(positions, lamp * 3)
-        lamp++
-      }
+
+      for (const l of boat.lamps) v.copy(l.local).applyMatrix4(m).toArray(positions, i++ * 3)
+      v.copy(boat.nav.local).applyMatrix4(m).toArray(positions, i++ * 3)
+
       for (const r of boat.reflected) {
-        lightPos[r.slot].copy(r.local).applyMatrix4(m)
-        lightColor[r.slot].set(r.color.r, r.color.g, r.color.b).multiplyScalar(lightsOn)
+        const p = water.lightPos[r.slot].copy(r.local).applyMatrix4(m)
+        // sideways reach of the column and its glow: a few degrees, wider up close
+        const dx = p.x - camera.position.x
+        const dz = p.z - camera.position.z
+        const d = Math.hypot(dx, dz)
+        water.lightDir[r.slot].set(dx / d, dz / d, Math.max(0.06, 60 / d))
+        const k = r.weight * boat.power * WATER_GAIN * brightness
+        water.lightColor[r.slot].set(r.color.r * k, r.color.g * k, r.color.b * k)
       }
-      boat.lampUniforms.uLampPos.value.copy(boat.lampCenter).applyMatrix4(m)
-      boat.lampUniforms.uLampColor.value.copy(boat.lampTint).multiplyScalar(lightsOn)
-    }
+
+      const center = v.copy(boat.center).applyMatrix4(m)
+      boat.lampUniforms.uLampPos.value.copy(center)
+      boat.lampUniforms.uLampColor.value.copy(boat.tint).multiplyScalar(HULL_GAIN * brightness)
+
+      if (n < MAX_FOG_LIGHTS) {
+        atmosphere.uFogLightPos.value[n].copy(center)
+        const k = FOG_GAIN * brightness
+        atmosphere.uFogLightColor.value[n].set(boat.tint.r * k, boat.tint.g * k, boat.tint.b * k)
+      }
+    })
     positionAttr.needsUpdate = true
   }
 
-  function setLightsOn(on) {
-    lightsOn = on ? 1 : 0
-    sprites.visible = on
+  function setBrightness(value) {
+    brightness = value
+    spriteUniforms.uGain.value = SPRITE_GAIN * value
+  }
+
+  function setHalo(value) {
+    spriteUniforms.uHalo.value = value
   }
 
   function resize(camera, height, pixelRatio) {
@@ -462,7 +548,7 @@ function createBoats(shared) {
     spriteUniforms.uPx.value = pixelRatio
   }
 
-  return { object: root, lightPos, lightColor, lightCount, update, setLightsOn, resize }
+  return { object: root, rebuild, update, setBrightness, setHalo, resize }
 }
 
-export { createBoats, MAX_BOAT_LIGHTS }
+export { createBoats }

@@ -1,296 +1,52 @@
 import * as THREE from 'three'
-import { Sky } from 'three/addons/objects/Sky.js'
-import { NightSky } from './nightSky.js'
-import { SWELL, RIPPLES } from './waves.js'
-import { createBoats, MAX_BOAT_LIGHTS } from './boats.js'
+import { createAtmosphere } from './atmosphere.js'
+import { createSky } from './sky.js'
+import { createWater } from './water.js'
+import { createBoats } from './boats.js'
+import { loadSettings, createControls } from './controls.js'
 
-// Sun position: low over the sea, slightly to the right of the view direction
-const SUN_ELEVATION = 7 // degrees
-const SUN_AZIMUTH = 168 // degrees, 180 = straight ahead (-z)
+// Night sea off Koh Phangan seen from a hillside: squid boats' lamps on the water,
+// humid air glowing with their light.
 
-// Moon position for the night mode
-const MOON_ELEVATION = 14
-const MOON_AZIMUTH = 218 // out of frame on the left, so its path doesn't cover the boats
-
-// Starting mode; press N to toggle
-const START_NIGHT = true
-
-function skyDirection(elevation, azimuth) {
-  return new THREE.Vector3().setFromSphericalCoords(
-    1,
-    THREE.MathUtils.degToRad(90 - elevation),
-    THREE.MathUtils.degToRad(azimuth)
-  )
-}
-
-const waterVertex = /* glsl */ `
-  #define NS ${SWELL.length}
-
-  uniform float uTime;
-  uniform vec4 uSwell[NS];
-
-  varying vec3 vWorld;
-  varying vec3 vBase;
-
-  void main() {
-    vec3 p = (modelMatrix * vec4(position, 1.0)).xyz;
-    vBase = p;
-
-    #ifdef DISPLACE
-      // Gerstner swell, faded out with distance so the mesh edge blends into the flat far plane
-      float fade = 1.0 - smoothstep(250.0, 520.0, length(p.xz - cameraPosition.xz));
-      vec3 d = vec3(0.0);
-      for (int i = 0; i < NS; i++) {
-        vec4 w = uSwell[i];
-        float k = 6.2831853 / w.w;
-        float c = sqrt(9.81 / k);
-        float f = k * (dot(w.xy, p.xz) - c * uTime) + float(i) * 1.37;
-        float q = 0.35;
-        d.xz += q * w.z * w.xy * cos(f);
-        d.y += w.z * sin(f);
-      }
-      p += d * fade;
-    #endif
-
-    vWorld = p;
-    gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
-  }
-`
-
-const waterFragment = /* glsl */ `
-  #define NS ${SWELL.length}
-  #define NR ${RIPPLES.length}
-  #define NL ${MAX_BOAT_LIGHTS}
-
-  uniform float uTime;
-  uniform vec4 uSwell[NS];
-  uniform vec4 uRipple[NR];
-  uniform samplerCube uSky;
-  uniform vec3 uSunDir;
-  uniform vec3 uSunColor;
-  uniform vec3 uLightPos[NL];
-  uniform vec3 uLightColor[NL];
-  uniform int uLightCount;
-
-  varying vec3 vWorld;
-  varying vec3 vBase;
-
-  float hash(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-  }
-
-  float vnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(
-      mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-      mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
-      u.y
-    );
-  }
-
-  // Adds the slope of one sine wave; waves smaller than the pixel footprint
-  // are faded out and their slope variance is moved into the roughness instead
-  void addWave(vec4 w, float phase, float gain, vec2 p, float footprint, inout vec2 slope, inout float lostVar) {
-    float k = 6.2831853 / w.w;
-    float c = sqrt(9.81 / k);
-    float f = k * (dot(w.xy, p) - c * uTime) + phase;
-    float s = w.z * gain * k;
-    float visible = 1.0 - smoothstep(0.08, 0.5, footprint / w.w);
-    slope += w.xy * (s * cos(f) * visible);
-    lostVar += (1.0 - visible) * s * s * 0.5;
-  }
-
-  void main() {
-    vec2 p = vBase.xz;
-    float footprint = max(length(dFdx(p)), length(dFdy(p)));
-
-    vec2 slope = vec2(0.0);
-    float lostVar = 0.0;
-
-    for (int i = 0; i < NS; i++) {
-      addWave(uSwell[i], float(i) * 1.37, 1.0, p, footprint, slope, lostVar);
-    }
-
-    // Slowly drifting patches of slightly stronger breeze ("cat's paws")
-    float breeze = vnoise(p * 0.018 + vec2(uTime * 0.02, uTime * 0.035));
-    breeze = mix(0.45, 1.35, smoothstep(0.2, 0.8, breeze));
-    for (int i = 0; i < NR; i++) {
-      addWave(uRipple[i], float(i) * 2.399, breeze, p, footprint, slope, lostVar);
-    }
-
-    vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
-    vec3 V = normalize(cameraPosition - vWorld);
-    vec3 L = normalize(uSunDir);
-
-    float NdV = max(dot(N, V), 1e-3);
-    float fresnel = 0.02 + 0.98 * pow(1.0 - NdV, 5.0);
-
-    // Sky reflection; flip rays that would point under the surface
-    vec3 R = reflect(-V, N);
-    R.y = abs(R.y);
-    vec3 sky = textureCube(uSky, R).rgb;
-
-    // Light scattered up from inside the water
-    vec3 skyUp = textureCube(uSky, vec3(0.0, 1.0, 0.0)).rgb;
-    float sunUp = max(L.y, 0.0);
-    vec3 body = vec3(0.012, 0.05, 0.065) * (skyUp * 1.5 + uSunColor * sunUp * 0.02);
-    // a touch of turquoise where the light passes through the backs of the swell
-    float thru = pow(max(dot(-V, L), 0.0), 4.0) * clamp(slope.y * 6.0 + 0.3, 0.0, 1.0);
-    body += vec3(0.02, 0.09, 0.08) * uSunColor * 0.01 * thru;
-
-    // Sun glitter: Beckmann lobe whose width grows with the sub-pixel ripples
-    vec3 H = normalize(L + V);
-    float NdH = max(dot(N, H), 1e-3);
-    float m2 = 0.0025 + lostVar;
-    float NdH2 = NdH * NdH;
-    float D = exp((NdH2 - 1.0) / (m2 * NdH2)) / (3.14159265 * m2 * NdH2 * NdH2);
-    float Fs = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
-    vec3 spec = uSunColor * D * Fs / (4.0 * NdV) * step(0.0, dot(N, L));
-
-    vec3 color = mix(body, sky, fresnel) + spec;
-
-    // Boat lamps: each one leaves a broken column of light on the water
-    // and a faint glow in the water around the boat
-    for (int i = 0; i < NL; i++) {
-      if (i >= uLightCount) break;
-      vec3 Lv = uLightPos[i] - vWorld;
-      float r2 = dot(Lv, Lv);
-      vec3 Ll = Lv * inversesqrt(r2);
-      vec3 Hl = normalize(Ll + V);
-      float nh = max(dot(N, Hl), 1e-3);
-      float nh2 = nh * nh;
-      float Dl = exp((nh2 - 1.0) / (m2 * nh2)) / (3.14159265 * m2 * nh2 * nh2);
-      float Fl = 0.02 + 0.98 * pow(1.0 - max(dot(Hl, V), 0.0), 5.0);
-      float NdL = dot(N, Ll);
-      vec3 E = uLightColor[i] / r2;
-      color += E * (Dl * Fl / (4.0 * NdV) * step(0.0, NdL) + 0.004 * max(NdL, 0.0));
-    }
-
-    // Haze toward the horizon, matching the sky right above it
-    float dist = length(vWorld - cameraPosition);
-    vec3 horizon = textureCube(uSky, normalize(vec3(-V.x, 0.002, -V.z))).rgb;
-    color = mix(color, horizon, smoothstep(2500.0, 60000.0, dist) * 0.6);
-
-    gl_FragColor = vec4(color, 1.0);
-
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`
+// Tone mapping: untouched in the dark range so the night colors match the photos,
+// then a soft shoulder that turns the bright lamps white (Khronos Neutral without its toe,
+// which would wipe out the red channel of the dark teal tones)
+THREE.ShaderChunk.tonemapping_pars_fragment = THREE.ShaderChunk.tonemapping_pars_fragment.replace(
+  'vec3 CustomToneMapping( vec3 color ) { return color; }',
+  /* glsl */ `
+  vec3 CustomToneMapping( vec3 color ) {
+    color *= toneMappingExposure;
+    const float start = 0.6;
+    float peak = max( color.r, max( color.g, color.b ) );
+    if ( peak <= start ) return color;
+    float d = 1.0 - start;
+    float newPeak = 1.0 - d * d / ( peak + d - start );
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / ( 0.15 * ( peak - newPeak ) + 1.0 );
+    return mix( color, vec3( newPeak ), g );
+  }`
+)
 
 function initOcean() {
   const container = document.querySelector('.sketchContainer')
 
   const renderer = new THREE.WebGLRenderer({ antialias: true })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-  renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 0.3
-  renderer.autoClear = false
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+  renderer.toneMapping = THREE.CustomToneMapping
   container.appendChild(renderer.domElement)
 
-  // View from a hillside above the shore through a long lens:
-  // narrow FOV, tilted slightly down so the horizon sits in the upper third
-  const camera = new THREE.PerspectiveCamera(25, 1, 1, 1e6)
-  camera.position.set(0, 40, 0)
-  camera.rotation.x = THREE.MathUtils.degToRad(-3.9)
+  const camera = new THREE.PerspectiveCamera(54, 1, 1, 1e6)
+  const scene = new THREE.Scene()
 
-  // Day sky
-  const sun = skyDirection(SUN_ELEVATION, SUN_AZIMUTH)
-  const sky = new Sky()
-  sky.scale.setScalar(450000)
-  const skyUniforms = sky.material.uniforms
-  skyUniforms.turbidity.value = 2.5
-  skyUniforms.rayleigh.value = 1.6
-  skyUniforms.mieCoefficient.value = 0.003
-  skyUniforms.mieDirectionalG.value = 0.85
-  skyUniforms.cloudCoverage.value = 0.25
-  skyUniforms.cloudDensity.value = 0.35
-  skyUniforms.sunPosition.value.copy(sun)
+  const atmosphere = createAtmosphere()
+  scene.add(createSky(atmosphere))
+  const water = createWater(atmosphere)
+  scene.add(...water.meshes)
+  const boats = createBoats(atmosphere, water)
+  scene.add(boats.object)
 
-  // Night sky
-  const moon = skyDirection(MOON_ELEVATION, MOON_AZIMUTH)
-  const nightSky = new NightSky()
-  nightSky.scale.setScalar(450000)
-  nightSky.material.uniforms.moonPosition.value.copy(moon)
-
-  // Light that the water reflects as the glitter path, per mode
-  const modes = {
-    day: {
-      sky,
-      lightDir: sun,
-      lightColor: new THREE.Color(1.0, 0.78, 0.52).multiplyScalar(18),
-      exposure: 0.3,
-      lampsOn: false
-    },
-    night: {
-      sky: nightSky,
-      lightDir: moon,
-      lightColor: new THREE.Color(0.75, 0.85, 1.0).multiplyScalar(0.07),
-      exposure: 0.9,
-      lampsOn: true
-    }
-  }
-
-  // Sky is rendered into a cube map that the water reflects
-  const skyScene = new THREE.Scene()
-  const cubeTarget = new THREE.WebGLCubeRenderTarget(256, {
-    type: THREE.HalfFloatType,
-    generateMipmaps: true,
-    minFilter: THREE.LinearMipmapLinearFilter
-  })
-  const cubeCamera = new THREE.CubeCamera(1, 1e6, cubeTarget)
-  skyScene.add(cubeCamera)
-
-  // Water
-  const waterScene = new THREE.Scene()
-  const uniforms = {
-    uTime: { value: 0 },
-    uSwell: { value: SWELL },
-    uRipple: { value: RIPPLES },
-    uSky: { value: cubeTarget.texture },
-    uSunDir: { value: sun },
-    uSunColor: { value: new THREE.Color() }
-  }
-
-  const boats = createBoats(uniforms)
-  uniforms.uLightPos = { value: boats.lightPos }
-  uniforms.uLightColor = { value: boats.lightColor }
-  uniforms.uLightCount = { value: boats.lightCount }
-
-  // Dense, displaced mesh near the shore
-  const nearGeometry = new THREE.PlaneGeometry(1200, 1200, 600, 600)
-  nearGeometry.rotateX(-Math.PI / 2)
-  const near = new THREE.Mesh(
-    nearGeometry,
-    new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: waterVertex,
-      fragmentShader: waterFragment,
-      defines: { DISPLACE: 1 }
-    })
-  )
-  near.position.z = -500
-  near.renderOrder = 1
-
-  // Flat plane out to the horizon, drawn first and overdrawn by the near mesh
-  const farGeometry = new THREE.PlaneGeometry(200000, 200000, 1, 1)
-  farGeometry.rotateX(-Math.PI / 2)
-  const far = new THREE.Mesh(
-    farGeometry,
-    new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: waterVertex,
-      fragmentShader: waterFragment,
-      depthWrite: false
-    })
-  )
-  far.renderOrder = 0
-
-  waterScene.add(far, near, boats.object)
+  const settings = loadSettings()
+  const color = (target, hex, level) => target.set(hex).multiplyScalar(level)
 
   function resize() {
     const { width, height } = container.getBoundingClientRect()
@@ -299,40 +55,46 @@ function initOcean() {
     camera.updateProjectionMatrix()
     boats.resize(camera, height, renderer.getPixelRatio())
   }
-  window.addEventListener('resize', resize)
-  resize()
 
-  let current = null
-  function setMode(name) {
-    const mode = modes[name]
-    if (current) skyScene.remove(current.sky)
-    skyScene.add(mode.sky)
-    uniforms.uSunDir.value = mode.lightDir
-    uniforms.uSunColor.value.copy(mode.lightColor)
-    renderer.toneMappingExposure = mode.exposure
-    boats.setLightsOn(mode.lampsOn)
-    current = mode
+  function apply(key) {
+    const s = settings
+
+    atmosphere.uHazeDensity.value = 2e-5 * Math.pow(150, s.humidity)
+    atmosphere.uHazeHeight.value = s.hazeHeight
+    atmosphere.uMistDensity.value = s.mist * 0.02
+    atmosphere.uMistHeight.value = s.mistHeight
+    color(atmosphere.uSkyZenith.value, s.skyZenith, s.skyZenithLevel)
+    color(atmosphere.uSkyGlow.value, s.skyGlow, s.skyGlowLevel)
+
+    color(water.uniforms.uWaterColor.value, s.waterColor, s.waterLevel)
+    water.uniforms.uRippleGain.value = s.ripple
+    water.uniforms.uSwellGain.value = s.swell
+
+    boats.setBrightness(s.brightness)
+    boats.setHalo(s.halo)
+
+    renderer.toneMappingExposure = s.exposure
+    camera.fov = s.fov
+    camera.position.set(0, s.height, 0)
+    camera.rotation.x = THREE.MathUtils.degToRad(s.pitch)
+    resize()
+
+    // boat distances come from the photo and the camera height
+    if (['all', 'photoBoats', 'horizonBoats', 'height'].includes(key)) {
+      boats.rebuild(s, s.height)
+    }
   }
-  setMode(START_NIGHT ? 'night' : 'day')
 
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'KeyN') setMode(current === modes.night ? 'day' : 'night')
-  })
+  apply('all')
+  createControls(settings, apply)
+  window.addEventListener('resize', resize)
 
   const clock = new THREE.Clock()
   renderer.setAnimationLoop(() => {
     const t = clock.getElapsedTime()
-    uniforms.uTime.value = t
-    skyUniforms.time.value = t
-    nightSky.material.uniforms.time.value = t
-    boats.update(t)
-
-    // Clouds drift, so refresh the reflection every frame (cheap at 256px)
-    cubeCamera.update(renderer, skyScene)
-
-    renderer.clear()
-    renderer.render(skyScene, camera)
-    renderer.render(waterScene, camera)
+    water.uniforms.uTime.value = t
+    boats.update(t, settings.swell, camera)
+    renderer.render(scene, camera)
   })
 }
 
