@@ -5,6 +5,9 @@
 html,
 body {
   height: 100%;
+  /* the same deep night as the edges of the scene, so overscroll and the browser bars stay dark */
+  background-color: #030c12;
+  color-scheme: dark;
 }
 
 body {

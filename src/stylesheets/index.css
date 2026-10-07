@@ -1,8 +1,9 @@
 .sketchContainer {
   width: 100vw;
   height: 100vh;
+  height: 100dvh; /* the visible area on phones, where 100vh reaches under the browser bars */
   overflow: hidden;
-  background-color: #0b1a24;
+  background-color: #030c12;
 }
 
 .sketchContainer canvas {
@@ -14,7 +15,7 @@
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 28px;
+  bottom: calc(28px + env(safe-area-inset-bottom));
   display: flex;
   justify-content: center;
   gap: 12px;
