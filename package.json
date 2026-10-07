@@ -1,0 +1,11 @@
+{
+  "name": "generative-boilerplate-bun",
+  "scripts": {
+    "dev": "bun bun.config.dev.js",
+    "clean": "rm -rf dist",
+    "build": "bun run clean && bun run bun.config.prod.js"
+  },
+  "dependencies": {
+    "p5": "^2.1.1"
+  }
+}
