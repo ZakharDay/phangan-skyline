@@ -2,8 +2,8 @@ import * as Tone from 'tone'
 import { createRandom } from './random.js'
 
 // Ambient sound of the night, built from the same hash and night parameters as the picture:
-//   - the sea washing the shore below the hill (rhythm and loudness from the sea state),
-//   - a low distant surf,
+//   - the sea far below the hill: a low, muffled, slowly breathing hush (louder in a breeze),
+//   - the faint even hush of the night air,
 //   - diesel generators humming on the nearest squid boats, each at its own pitch,
 //     placed left or right where the boat is,
 //   - now and then a cricket on the hill (not every night, never in fog),
@@ -28,11 +28,11 @@ const WEATHER_SOUND = {
   fog: { cutoff: 2500, wet: 0.55, decay: 9 }
 }
 
-// Slow sea: one swell of noise every 10-22 seconds, rising for several seconds and fading longer
+// The sea heard from far away up the hill: only its low end reaches us, quiet and steady
 const SEA_SOUND = {
-  calm: { level: 0.07, period: [17, 22], bells: 0.04 },
-  ripple: { level: 0.12, period: [13, 17], bells: 0.06 },
-  breeze: { level: 0.18, period: [10, 13], bells: 0.09 }
+  calm: { level: 0.03, cutoff: 160, bells: 0.04 },
+  ripple: { level: 0.04, cutoff: 200, bells: 0.06 },
+  breeze: { level: 0.055, cutoff: 260, bells: 0.09 }
 }
 
 const PAD_TIMBRE = { green: 'sine', white: 'triangle', mixed: 'sine4' }
@@ -53,7 +53,6 @@ function designSound(night) {
     scale: scale.steps,
     weather: WEATHER_SOUND[night.conditions.weather],
     sea: SEA_SOUND[night.conditions.sea],
-    wavePeriod: r.range(...SEA_SOUND[night.conditions.sea].period),
     timbre: PAD_TIMBRE[night.conditions.palette] ?? 'sine',
     crickets,
     label: `${NOTE_NAMES_RU[root]}, ${scale.name}`
@@ -87,40 +86,30 @@ function createSound() {
     const air = keep(new Tone.Filter(design.weather.cutoff, 'lowpass').connect(reverb))
     const bus = keep(new Tone.Gain(1).connect(air))
 
-    // Sea washing the shore: two voices, left and right, slightly out of step
-    ;[-0.45, 0.45].forEach((pan, v) => {
-      const noise = keep(new Tone.Noise('pink').start())
-      const filter = keep(new Tone.Filter(350, 'lowpass'))
-      const gain = keep(new Tone.Gain(0))
+    // The sea far below the hill: no waves to speak of, only a low, muffled breath of the water
+    // coming from a distance, swelling and fading over a minute or more. Two voices, left and
+    // right, at slightly different pitch and pace so the sound is wide and never quite repeats.
+    ;[-0.6, 0.6].forEach((pan, v) => {
+      const r = stream('sound', 'sea', v)
+      const noise = keep(new Tone.Noise('brown').start())
+      const filter = keep(new Tone.Filter(design.sea.cutoff * r.range(0.85, 1.15), 'lowpass', -24))
+      const gain = keep(new Tone.Gain(design.sea.level))
       const panner = keep(new Tone.Panner(pan).connect(bus))
       noise.chain(filter, gain, panner)
-      let wave = 0
-      const loop = keep(
-        new Tone.Loop((time) => {
-          const r = stream('sound', 'wave', v, wave++)
-          const start = time + r.range(0, 4)
-          const peak = design.sea.level * r.range(0.6, 1.2)
-          const rise = r.range(3.5, 6)
-          const fall = r.range(7, 11)
-          gain.gain.cancelScheduledValues(start)
-          gain.gain.linearRampToValueAtTime(peak, start + rise)
-          gain.gain.linearRampToValueAtTime(peak * 0.2, start + rise + fall)
-          filter.frequency.cancelScheduledValues(start)
-          filter.frequency.linearRampToValueAtTime(r.range(550, 1000), start + rise)
-          filter.frequency.linearRampToValueAtTime(300, start + rise + fall)
-        }, design.wavePeriod)
+      const lfo = keep(
+        new Tone.LFO(r.range(0.01, 0.018), design.sea.level * 0.7, design.sea.level * 1.3).start()
       )
-      loop.start(v * design.wavePeriod * 0.5)
+      lfo.phase = r.range(0, 360)
+      lfo.connect(gain.gain)
     })
 
-    // Low distant surf, breathing slowly
+    // The air of the night: a faint, even hush, barely above silence
     {
-      const noise = keep(new Tone.Noise('brown').start())
-      const filter = keep(new Tone.Filter(140, 'lowpass'))
-      const gain = keep(new Tone.Gain(design.sea.level * 0.5))
-      noise.chain(filter, gain, bus)
-      const lfo = keep(new Tone.LFO(0.015, design.sea.level * 0.3, design.sea.level * 0.7).start())
-      lfo.connect(gain.gain)
+      const noise = keep(new Tone.Noise('pink').start())
+      const low = keep(new Tone.Filter(1800, 'lowpass'))
+      const high = keep(new Tone.Filter(250, 'highpass'))
+      const gain = keep(new Tone.Gain(0.004))
+      noise.chain(low, high, gain, bus)
     }
 
     // Generators of the nearest boats: a low buzz with a slow beat, panned to the boat
