@@ -8,3 +8,59 @@
 .sketchContainer canvas {
   display: block;
 }
+
+/* Barely-there pills, centered together at the bottom */
+.controlsBar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 28px;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 16px;
+  pointer-events: none;
+}
+
+.pillButton {
+  pointer-events: auto;
+  padding: 16px 28px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: rgba(255, 255, 255, 0.42);
+  font: 400 12px/1 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s;
+}
+
+.pillButton:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.pillButton:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.35);
+  outline-offset: 3px;
+}
+
+/* Narrow screens: a little less padding so both fit side by side */
+@media (max-width: 600px) {
+  .controlsBar {
+    gap: 8px;
+  }
+
+  .pillButton {
+    padding: 16px 18px;
+    letter-spacing: 0.12em;
+  }
+}

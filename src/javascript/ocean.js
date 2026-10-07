@@ -139,14 +139,25 @@ function initOcean() {
   }
 
   const sound = createSound()
+  const soundButton = document.getElementById('soundButton')
+  async function toggleSound() {
+    const playing = await sound.toggle()
+    soundButton.textContent = playing ? 'stop sound' : 'play sound'
+    controls.setSoundPlaying(playing)
+  }
+  soundButton.addEventListener('click', toggleSound)
+
+  const newNight = () => {
+    hash = randomHash()
+    loadNight()
+  }
+  document.getElementById('refreshButton').addEventListener('click', newNight)
+
   const controls = createControls(settings, {
-    onSoundToggle: () => sound.toggle(),
+    onSoundToggle: toggleSound,
     onVolume: (db) => sound.setVolume(db),
     onChange: apply,
-    onNewNight: () => {
-      hash = randomHash()
-      loadNight()
-    },
+    onNewNight: newNight,
     onSource: (value) => {
       source = value
       loadNight()
@@ -155,6 +166,13 @@ function initOcean() {
   })
   loadNight()
   window.addEventListener('resize', resize)
+
+  // S shows or hides the settings, R makes a new night
+  window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input, textarea, select')) return
+    if (e.code === 'KeyS') controls.toggleVisible()
+    if (e.code === 'KeyR') newNight()
+  })
 
   const clock = new THREE.Clock()
   renderer.setAnimationLoop(() => {

@@ -32,7 +32,9 @@ const DEFAULTS = {
 const MOON_SOURCES = { 'Дата минта': 'date', 'Номер токена': 'token' }
 
 function createControls(settings, handlers) {
+  // hidden until the S key is pressed
   const gui = new GUI({ title: 'Настройки' })
+  gui.hide()
   const slider = (folder, key, min, max, step, name) =>
     folder.add(settings, key, min, max, step).name(name).onChange(() => handlers.onChange(key))
   const color = (folder, key, name) =>
@@ -44,10 +46,7 @@ function createControls(settings, handlers) {
   const soundButton = soundFolder
     .add(
       {
-        toggle: async () => {
-          const playing = await handlers.onSoundToggle()
-          soundButton.name(playing ? 'Выключить звук' : 'Включить звук')
-        }
+        toggle: () => handlers.onSoundToggle()
       },
       'toggle'
     )
@@ -123,7 +122,15 @@ function createControls(settings, handlers) {
     gui.controllersRecursive().forEach((c) => c.updateDisplay())
   }
 
-  return { showNight }
+  function setSoundPlaying(playing) {
+    soundButton.name(playing ? 'Выключить звук' : 'Включить звук')
+  }
+
+  function toggleVisible() {
+    gui.show(gui._hidden)
+  }
+
+  return { showNight, setSoundPlaying, toggleVisible }
 }
 
 export { DEFAULTS, createControls }
