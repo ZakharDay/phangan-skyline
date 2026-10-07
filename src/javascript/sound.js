@@ -7,18 +7,28 @@ import { createRandom } from './random.js'
 //   - diesel generators humming on the nearest squid boats, each at its own pitch,
 //     placed left or right where the boat is,
 //   - now and then a cricket on the hill (not every night, never in fog),
-//   - rare slow chords and rare bell notes like glints on the water: the key comes from the hash,
-//     the mode from the moon (darker at new moon, brighter at full moon).
+//   - rare soft chords (plain open triads, nothing tense), rare bell notes like glints on the water,
+//     and now and then a high shimmering run of a few notes: the key comes from the hash,
+//     the mode from the moon (minor at new moon, major at full moon).
 // Fog muffles everything and adds a longer echo. Every random choice comes from a named
 // stream (layer and event number), so a night always sounds the same.
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B']
 const NOTE_NAMES_RU = ['До', 'До♯', 'Ре', 'Ми♭', 'Ми', 'Фа', 'Фа♯', 'Соль', 'Ля♭', 'Ля', 'Си♭', 'Си']
 
-const SCALES = {
-  dark: { steps: [0, 2, 3, 7, 8], name: 'тёмная пентатоника' },
-  minor: { steps: [0, 3, 5, 7, 10], name: 'минорная пентатоника' },
-  major: { steps: [0, 2, 4, 7, 9], name: 'мажорная пентатоника' }
+// Melodies use the pentatonic of the mode; chords are plain triads [root, third] in semitones
+// from the key: i, VI, III, iv in minor and I, IV, vi, V in major
+const MODES = {
+  minor: {
+    name: 'минор',
+    steps: [0, 3, 5, 7, 10],
+    chords: [[0, 3], [8, 4], [3, 4], [5, 3]]
+  },
+  major: {
+    name: 'мажор',
+    steps: [0, 2, 4, 7, 9],
+    chords: [[0, 4], [5, 4], [9, 3], [7, 4]]
+  }
 }
 
 const WEATHER_SOUND = {
@@ -35,14 +45,13 @@ const SEA_SOUND = {
   breeze: { level: 0.055, cutoff: 260, bells: 0.09 }
 }
 
-const PAD_TIMBRE = { green: 'sine', white: 'triangle', mixed: 'sine4' }
+const PAD_TIMBRE = { green: 'sine', white: 'triangle', mixed: 'sine' }
 
 // Everything about the sound that follows from the night, without touching the audio engine
 function designSound(night) {
   const r = createRandom(night.hash)('sound', 'design')
   const root = r.int(0, 11)
-  const scaleKey = night.moon.fraction < 0.3 ? 'dark' : night.moon.fraction < 0.7 ? 'minor' : 'major'
-  const scale = SCALES[scaleKey]
+  const mode = MODES[night.moon.fraction < 0.5 ? 'minor' : 'major']
   const hour = night.time.hour
   const lateness = hour >= 19 ? hour - 19 : hour + 5 // 0 at 19:00, 9 at 04:00
   // a single cricket at most, and not every night: more likely early in the evening, never in fog
@@ -50,12 +59,13 @@ function designSound(night) {
 
   return {
     root,
-    scale: scale.steps,
+    scale: mode.steps,
+    chords: mode.chords,
     weather: WEATHER_SOUND[night.conditions.weather],
     sea: SEA_SOUND[night.conditions.sea],
     timbre: PAD_TIMBRE[night.conditions.palette] ?? 'sine',
     crickets,
-    label: `${NOTE_NAMES_RU[root]}, ${scale.name}`
+    label: `${NOTE_NAMES_RU[root]} ${mode.name}`
   }
 }
 
@@ -169,7 +179,8 @@ function createSound() {
       loop.start(r.range(0, 1))
     }
 
-    // Slow pad: now and then a chord from the night's scale swells up and fades
+    // Soft pad: now and then a plain chord swells up and fades. Open voicing (bass, fifth, and
+    // the third an octave up), a pure tone with the highs rolled off, so it stays calm
     const scaleNote = (degree, octave) => {
       const steps = design.scale
       const d = ((degree % steps.length) + steps.length) % steps.length
@@ -177,21 +188,22 @@ function createSound() {
       return 12 * (o + 1) + design.root + steps[d]
     }
     const pad = keep(
-      new Tone.PolySynth(Tone.AMSynth, {
+      new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: design.timbre },
-        envelope: { attack: 9, decay: 4, sustain: 0.6, release: 14 },
-        modulationEnvelope: { attack: 10, release: 14 }
+        envelope: { attack: 10, decay: 4, sustain: 0.7, release: 16 }
       })
     )
     pad.volume.value = -30
-    pad.connect(bus)
+    const padTone = keep(new Tone.Filter(900, 'lowpass').connect(bus))
+    pad.connect(padTone)
     let chord = 0
     keep(
       new Tone.Loop((time) => {
         const r = stream('sound', 'chord', chord++)
         if (r.bool(0.45)) return // often just the sea
-        const degree = r.int(0, 4)
-        const notes = [0, 2, 4].map((k) => noteName(scaleNote(degree + k, 3)))
+        const [offset, third] = r.pick(design.chords)
+        const base = 12 * 3 + design.root + offset // bass in the second octave
+        const notes = [base, base + 7 + 12, base + third + 24].map(noteName)
         pad.triggerAttackRelease(notes, 24, time, r.range(0.4, 0.7))
       }, 36).start(2)
     )
@@ -200,7 +212,7 @@ function createSound() {
     const bell = keep(
       new Tone.PolySynth(Tone.FMSynth, {
         harmonicity: 3.01,
-        modulationIndex: 10,
+        modulationIndex: 4,
         envelope: { attack: 0.002, decay: 2.5, sustain: 0, release: 2 },
         modulationEnvelope: { attack: 0.002, decay: 0.6, sustain: 0, release: 0.5 }
       })
@@ -217,6 +229,36 @@ function createSound() {
         bellPan.pan.setValueAtTime(r.range(-0.7, 0.7), time)
         bell.triggerAttackRelease(noteName(scaleNote(r.int(0, 9), 5)), 1.5, time, r.range(0.3, 0.6))
       }, 4).start(8)
+    )
+
+    // Shimmer: once in a long while a quick run of a few high notes, like a celesta,
+    // drifting across and echoing away
+    const echo = keep(new Tone.FeedbackDelay({ delayTime: 0.38, feedback: 0.35, wet: 0.35 }).connect(bus))
+    const shimmerPan = keep(new Tone.Panner(0).connect(echo))
+    const shimmer = keep(
+      new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'sine' },
+        envelope: { attack: 0.004, decay: 1.6, sustain: 0, release: 1.8 }
+      })
+    )
+    shimmer.volume.value = -30
+    shimmer.connect(shimmerPan)
+    let run = 0
+    keep(
+      new Tone.Loop((time) => {
+        const r = stream('sound', 'shimmer', run++)
+        if (!r.bool(0.08)) return
+        const count = r.int(3, 5)
+        const first = r.int(0, 4)
+        const step = r.pick([1, 1, 2])
+        const gap = r.range(0.12, 0.2)
+        const from = r.range(-0.7, 0.7)
+        shimmerPan.pan.setValueAtTime(from, time)
+        shimmerPan.pan.linearRampToValueAtTime(-from * 0.5, time + count * gap)
+        for (let k = 0; k < count; k++) {
+          shimmer.triggerAttackRelease(noteName(scaleNote(first + k * step, 6)), 0.8, time + k * gap, r.range(0.25, 0.5))
+        }
+      }, 6).start(15)
     )
 
     return () => {
