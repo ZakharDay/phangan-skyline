@@ -105,6 +105,7 @@ function nightTime(stream, source) {
   return {
     date,
     tokenId,
+    hour: shown.getUTCHours() + shown.getUTCMinutes() / 60,
     label: `${shown.getUTCFullYear()}-${pad(shown.getUTCMonth() + 1)}-${pad(shown.getUTCDate())} ${pad(shown.getUTCHours())}:${pad(shown.getUTCMinutes())}`
   }
 }
@@ -262,6 +263,7 @@ function generateNight(hash, source = 'date') {
     moon,
     boats,
     traits,
+    conditions: { weather: weatherKey, sea: seaKey, fleet: fleetKey, palette: dominant },
     settings: {
       humidity: r.range(...weather.humidity),
       mist: r.range(...weather.mist),

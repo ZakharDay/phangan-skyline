@@ -38,6 +38,25 @@ function createControls(settings, handlers) {
   const color = (folder, key, name) =>
     folder.addColor(settings, key).name(name).onChange(() => handlers.onChange(key))
 
+  // Sound starts only on a click: browsers block audio until the user interacts with the page
+  const soundFolder = gui.addFolder('Звук')
+  const soundState = { volume: -8 }
+  const soundButton = soundFolder
+    .add(
+      {
+        toggle: async () => {
+          const playing = await handlers.onSoundToggle()
+          soundButton.name(playing ? 'Выключить звук' : 'Включить звук')
+        }
+      },
+      'toggle'
+    )
+    .name('Включить звук')
+  soundFolder
+    .add(soundState, 'volume', -40, 0, 0.5)
+    .name('Громкость, дБ')
+    .onChange((db) => handlers.onVolume(db))
+
   const nightFolder = gui.addFolder('Ночь')
   const nightState = { hash: '', source: 'date' }
   nightFolder.add(nightState, 'hash').name('Хеш').disable()

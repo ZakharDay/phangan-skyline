@@ -6,6 +6,7 @@ import { createBoats } from './boats.js'
 import { DEFAULTS, createControls } from './controls.js'
 import { generateNight } from './night.js'
 import { randomHash, hashFromUrl } from './random.js'
+import { createSound, designSound } from './sound.js'
 
 const MOON_COLOR = new THREE.Color(0.9, 0.95, 1.0)
 // how much a bright moon lifts the night sky and the glow over the horizon
@@ -124,9 +125,11 @@ function initOcean() {
 
   function loadNight() {
     night = generateNight(hash, source)
+    night.traits['Звук'] = designSound(night).label
     Object.assign(settings, DEFAULTS, night.settings)
     boats.rebuild(night.boats)
     apply()
+    sound.setNight(night)
     controls.showNight(night)
 
     const url = new URL(location.href)
@@ -135,7 +138,10 @@ function initOcean() {
     history.replaceState(null, '', url)
   }
 
+  const sound = createSound()
   const controls = createControls(settings, {
+    onSoundToggle: () => sound.toggle(),
+    onVolume: (db) => sound.setVolume(db),
     onChange: apply,
     onNewNight: () => {
       hash = randomHash()
